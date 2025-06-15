@@ -98,7 +98,6 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) -> Status {
-        println!("{event:?}");
         let handled = 'blk: {
             match event {
                 Event::Keyboard(keyboard::Event::KeyReleased {
@@ -122,23 +121,25 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
                         Key::Character(c) if is_ctrl && (c == "a" || c == "c" || c == "x") => {
                             break 'blk false;
                         }
-                        _ if ALLOWED_ACTION_MODIFIERS.intersects(*modifiers) => {
-                            shell.publish(Message::KeyPressed(key.clone(), *modifiers));
-                        }
                         Key::Named(Named::Enter) => shell.publish(Message::Submit),
                         Key::Named(Named::PageUp) => shell.publish(Message::Go10Up),
                         Key::Named(Named::PageDown) => shell.publish(Message::Go10Down),
                         Key::Named(Named::ArrowUp) => shell.publish(Message::GoUp),
                         Key::Named(Named::ArrowDown) => shell.publish(Message::GoDown),
-                        Key::Named(Named::Escape) => shell.publish(Message::Hide),
+                        Key::Named(Named::Escape) => shell.publish(Message::HideMainWindow),
                         Key::Named(Named::Alt) => shell.publish(Message::ShowActions),
                         Key::Named(Named::Tab) => {
                             shell.publish(Message::KeyPressed(Key::Named(Named::Tab), *modifiers))
                         }
+                        _ if ALLOWED_ACTION_MODIFIERS.intersects(*modifiers) => {
+                            shell.publish(Message::KeyPressed(key.clone(), *modifiers));
+                        }
                         _ => break 'blk false,
                     }
                 }
-                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+                    if cursor.position_over(layout.bounds()).is_some() =>
+                {
                     shell.publish(Message::InputPress);
                 }
 

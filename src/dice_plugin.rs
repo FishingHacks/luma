@@ -2,7 +2,7 @@ use iced::clipboard;
 use rand::Rng;
 use std::fmt::Write;
 
-use crate::{CustomData, Entry, Plugin, ResultBuilder, matcher::MatcherInput};
+use crate::{Action, CustomData, Entry, Plugin, ResultBuilder, matcher::MatcherInput};
 
 #[derive(Default)]
 pub struct DicePlugin;
@@ -39,8 +39,12 @@ impl Plugin for DicePlugin {
 
     fn init(&mut self) {}
 
-    fn handle(&self, thing: crate::CustomData) -> iced::Task<crate::Message> {
+    fn handle(&self, thing: crate::CustomData, _: &str) -> iced::Task<crate::Message> {
         clipboard::write(format!("{}", thing.into::<usize>()))
+    }
+
+    fn actions(&self) -> &'static [Action] {
+        const { &[Action::default("Copy to clipboard", "")] }
     }
 }
 

@@ -23,7 +23,18 @@ pub struct Files {
 }
 
 #[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlurAction {
+    Refocus,
+    Hide,
+    #[default]
+    None,
+}
+
+#[derive(Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "Default::default")]
     files: Files,
+    #[serde(default = "Default::default")]
+    on_blur: BlurAction,
 }

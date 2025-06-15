@@ -53,10 +53,14 @@ impl Plugin for ControlPlugin {
 
     fn init(&mut self) {}
 
-    fn handle(&self, thing: CustomData) -> iced::Task<Message> {
+    fn handle(&self, thing: CustomData, _: &str) -> iced::Task<Message> {
         match thing.into::<Action>() {
             Action::Quit => Task::done(Message::Exit),
-            Action::Hide => Task::done(Message::Hide),
+            Action::Hide => Task::done(Message::HideMainWindow),
         }
+    }
+
+    fn actions(&self) -> &'static [crate::Action] {
+        const { &[crate::Action::default("Execute Action", "")] }
     }
 }

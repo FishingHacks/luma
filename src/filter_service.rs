@@ -75,8 +75,11 @@ impl CollectorController {
             .try_send(Action::Start(plugins, query, self.stop.clone()))
         {
             Err(e) if e.is_disconnected() => {
-                eprintln!("Failed to start a collection cycle: {e:?}");
+                log::debug!("Failed to start a collection cycle: {e:?}");
                 return false;
+            }
+            Err(e) if e.is_full() => {
+                log::error!("failed to start a collection cycle: {e:?} (this is very bad)")
             }
             _ => {}
         }
@@ -87,9 +90,9 @@ impl CollectorController {
         if !self.stop.swap(true, Ordering::SeqCst) {
             match self.sender.try_send(Action::Stop) {
                 Err(e) if e.is_disconnected() => {
-                    eprintln!("Failed to start a collection cycle: {e:?}");
+                    log::debug!("Failed to stop a collection cycle: {e:?}");
                 }
-                Err(e) => eprintln!(
+                Err(e) => log::error!(
                     "failed to stop the collection cycle: {e:?} (this is **extremely** bad)"
                 ),
                 _ => {}
@@ -108,7 +111,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
             Ok(_) => (),
             Err(e) if e.is_full() => unreachable!("this channel can't be full"),
             Err(e) => {
-                eprintln!("stopping the file indexer: {e:?}");
+                log::debug!("stopping the collector: {e:?}");
                 return;
             }
         }
@@ -122,7 +125,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                             (plugins, query, stop_bool)
                         }
                         None => {
-                            return eprintln!(
+                            return log::debug!(
                                 "action sender was dropped, stopping the search result collection."
                             );
                         }
@@ -179,15 +182,15 @@ fn handle_send_result(res: Result<(), SendError>) -> bool {
     match res {
         Ok(_) => false,
         Err(e) if e.is_full() => {
-            eprintln!("Error: Frontend is not responding: {e:?}");
+            log::debug!("Error: Frontend is not responding: {e:?}");
             false
         }
         Err(e) if e.is_disconnected() => {
-            eprintln!("collector receiver is disconnected, exiting: {e:?}");
+            log::debug!("collector receiver is disconnected, exiting: {e:?}");
             true
         }
         Err(e) => {
-            eprintln!("Collector Error: {e:?}");
+            log::info!("Collector Error: {e:?}");
             true
         }
     }

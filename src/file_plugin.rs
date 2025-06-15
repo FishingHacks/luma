@@ -19,7 +19,9 @@ use iced::{
 };
 use smol::{lock::RwLock, stream::StreamExt as _};
 
-use crate::{CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput, utils};
+use crate::{
+    Action, CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput, utils,
+};
 
 static IGNORED_DIRECTORIES: &[&str] = &["node_modules", "target"];
 static FILE_INDEX: RwLock<FileIndex> = RwLock::new(FileIndex {
@@ -42,25 +44,25 @@ pub fn start_indexer() -> impl Stream<Item = IndexerMessage> {
             Ok(_) => (),
             Err(e) if e.is_full() => unreachable!("this channel can't be full"),
             Err(e) => {
-                eprintln!("stopping the file indexer: {e:?}");
+                log::debug!("stopping the file indexer: {e:?}");
                 return;
             }
         }
 
         loop {
             if StreamExt::next(&mut receiver).await.is_none() {
-                println!("sender was dropped, stopping file indexer");
+                log::debug!("sender was dropped, stopping file indexer");
                 return;
             }
-            println!("Indexing files...");
+            log::debug!("Indexing files...");
 
             let mut indexer = Indexer::new();
             let now = Instant::now();
             while indexer.cycle().await {}
             let elapsed = now.elapsed();
             let index = indexer.finish();
-            println!(
-                "{} File(s) and {} Directorie(s) indexed in {elapsed:?}",
+            log::info!(
+                "Indexed {} File(s) and {} Directorie(s) in {elapsed:?}",
                 index.files.len(),
                 index.directories.len(),
             );
@@ -75,7 +77,7 @@ pub fn start_indexer() -> impl Stream<Item = IndexerMessage> {
                 // anwyay.
                 Err(e) if e.is_full() => (),
                 Err(e) => {
-                    println!("stopping the file indexer: {e:?}");
+                    log::debug!("stopping the file indexer: {e:?}");
                     return;
                 }
             }
@@ -123,7 +125,7 @@ impl Indexer {
         let mut dirent = match smol::fs::read_dir(&directory).await {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("Failed to read {}: {e}", directory.display());
+                log::debug!("Failed to read {}: {e}", directory.display());
                 return true;
             }
         };
@@ -200,7 +202,7 @@ impl Plugin for FilePlugin {
 
     fn init(&mut self) {}
 
-    fn handle(&self, thing: CustomData) -> Task<Message> {
+    fn handle(&self, thing: CustomData, _: &str) -> Task<Message> {
         let (is_file, index) = thing.into::<(bool, usize)>();
         let reader = FILE_INDEX.read_blocking();
         let arr = if is_file {
@@ -211,9 +213,13 @@ impl Plugin for FilePlugin {
         if arr.len() <= index {
             return Task::none();
         }
-        utils::run("xdg-open", [&arr[index]]);
+        utils::open_file(&arr[index]);
         drop(reader);
         Task::none()
+    }
+
+    fn actions(&self) -> &'static [Action] {
+        const { &[Action::default("Open", "")] }
     }
 }
 

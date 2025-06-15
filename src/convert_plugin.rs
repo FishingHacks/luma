@@ -1,8 +1,8 @@
 use std::{borrow::Cow, iter};
 
-use iced::clipboard;
+use iced::{Task, clipboard};
 
-use crate::{CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput};
+use crate::{Action, CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput};
 
 // Currency: See https://www.exchangerate-api.com/docs/free
 
@@ -23,17 +23,23 @@ impl Plugin for ConvertPlugin {
     }
 
     async fn get_for_values(&self, input: &MatcherInput<'_>, builder: &ResultBuilder) {
-        let words = input.words();
+        let mut words = input.input().split(" ");
         // <value> <unit> to <unit>
-        if words.len() != 4 || words[2] != "to" {
+        let Some(value) = words.next() else { return };
+        let Some(unit_from) = words.next() else {
+            return;
+        };
+        let Some(to) = words.next() else { return };
+        let Some(unit_to) = words.next() else { return };
+        if words.next().is_some() || to != "to" {
             return;
         }
-        let Ok(amount) = words[0].parse::<f64>() else {
+        let Ok(amount) = value.parse::<f64>() else {
             return;
         };
         for conversion in CONVERSIONS {
-            if conversion.0.eq_ignore_ascii_case(words[1])
-                && conversion.1.eq_ignore_ascii_case(words[3])
+            if conversion.0.eq_ignore_ascii_case(unit_from)
+                && conversion.1.eq_ignore_ascii_case(unit_to)
             {
                 let result = amount * conversion.2;
                 return builder
@@ -50,14 +56,32 @@ impl Plugin for ConvertPlugin {
 
     fn init(&mut self) {}
 
-    fn handle(&self, thing: CustomData) -> iced::Task<Message> {
-        let result = thing.into::<(f64, &'static str)>();
-        let value = if result.0 == result.0.floor() {
-            format!("{} {}", result.0 as i64, result.1)
+    fn handle(&self, thing: CustomData, action: &str) -> iced::Task<Message> {
+        if action == "copy" {
+            let result = thing.into::<(f64, &'static str)>();
+            let value = if result.0 == result.0.floor() {
+                format!("{} {}", result.0 as i64, result.1)
+            } else {
+                format!("{} {}", result.0, result.1)
+            };
+            clipboard::write(value)
         } else {
-            format!("{} {}", result.0, result.1)
-        };
-        println!("Writing {value}");
-        clipboard::write(value)
+            let result = thing.into::<(f64, &'static str)>();
+            let value = if result.0 == result.0.floor() {
+                format!("convert {} {} to", result.0 as i64, result.1)
+            } else {
+                format!("convert {} {} to", result.0, result.1)
+            };
+            Task::done(Message::SetSearch(value))
+        }
+    }
+
+    fn actions(&self) -> &'static [crate::Action] {
+        const {
+            &[
+                Action::default("Copy to clipboard", "copy"),
+                Action::suggest("Convert to", "suggest").keep_open(),
+            ]
+        }
     }
 }

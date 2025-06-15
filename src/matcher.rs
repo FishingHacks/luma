@@ -1,6 +1,7 @@
 #[derive(Debug)]
-pub enum MatcherInput<'a> {
-    Words(Vec<&'a str>),
+pub struct MatcherInput<'a> {
+    split_words: Vec<&'a str>,
+    input: &'a str,
 }
 
 #[inline(always)]
@@ -46,26 +47,31 @@ impl<'a> MatcherInput<'a> {
     pub fn new(s: &'a str) -> Self {
         let s = s.trim();
         if s.is_empty() {
-            return Self::Words(Vec::new());
+            return Self {
+                split_words: Vec::new(),
+                input: s,
+            };
         }
-        Self::Words(
-            s.split_terminator(is_terminator)
+        Self {
+            input: s,
+            split_words: s
+                .split_terminator(is_terminator)
                 .map(|v| v.trim_matches(is_terminator))
                 .filter(|v| !v.is_empty())
                 .collect(),
-        )
+        }
+    }
+
+    pub fn input(&self) -> &'a str {
+        self.input
     }
 
     pub fn matches(&self, pattern: &str) -> bool {
-        match self {
-            MatcherInput::Words(words) => matches_words(pattern, words),
-        }
+        matches_words(pattern, &self.split_words)
     }
 
     pub fn words(&self) -> &[&'a str] {
-        match self {
-            MatcherInput::Words(items) => items,
-        }
+        &self.split_words
     }
 }
 

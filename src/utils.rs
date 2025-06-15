@@ -1,10 +1,16 @@
 use std::{
-    ffi::OsStr,
+    borrow::Cow,
+    ffi::{OsStr, OsString},
     ops::Deref,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::LazyLock,
+    sync::{LazyLock, RwLock},
+    time::Duration,
 };
+
+use freedesktop_file_parser::{DesktopFile, EntryType};
+
+use crate::cache::Cache;
 
 pub static DATA_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
     let mut dirs = vec![PathBuf::from("/usr/share/applications")];
@@ -68,8 +74,8 @@ pub fn run_cmd(mut cmd: Command) {
         .stderr(Stdio::null())
         .spawn()
     {
-        Ok(_) => println!("Running {cmd:?}"),
-        Err(e) => eprintln!("Failed to run {cmd:?}: {e:?}"),
+        Ok(_) => log::trace!("Running {cmd:?}"),
+        Err(e) => log::warn!("Failed to run {cmd:?}: {e:?}"),
     }
 }
 
@@ -79,7 +85,7 @@ pub fn run(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item = impl AsRef<OsS
     run_cmd(cmd)
 }
 
-pub fn locate_desktop_file(name: &str) -> Option<PathBuf> {
+pub fn locate_desktop_file(name: impl AsRef<Path> + Copy) -> Option<PathBuf> {
     DATA_DIRS
         .iter()
         .map(|path| path.join(name))
@@ -95,24 +101,95 @@ pub fn run_in_terminal(cmd: Command) {
             .args(cmd.get_args());
         run_cmd(command);
     } else {
-        eprintln!("canno run {cmd:?} in terminal because none is set.");
+        log::warn!("cannot run {cmd:?} in terminal because none is set.");
     }
 }
 
-// pub fn run_desktop_file(file: &Path) {
-//     let contents = match std::fs::read_to_string(file) {
-//         Ok(v) => v,
-//         Err(e) => {
-//             eprintln!("failed to load desktop file from {}: {e:?}", file.display());
-//             return;
-//         }
-//     };
-//     let parsed = match freedesktop_file_parser::parse(&contents) {
-//         Ok(v) => v,
-//         Err(e) => {
-//             eprintln!("failed to load desktop file from {}: {e:?}", file.display());
-//             return;
-//         }
-//     };
-//     parsed.
-// }
+pub fn open_file(file: impl Into<PathBuf>) {
+    let file = file.into();
+    let mut cmd = Command::new("xdg-mime");
+    cmd.arg("query").arg("filetype").arg(&file);
+    std::thread::spawn(move || {
+        let output = match cmd.output() {
+            Ok(output) if output.status.success() => output.stdout,
+            _ => return,
+        };
+        let Ok(output) = str::from_utf8(&output) else {
+            return;
+        };
+        let output = output.lines().next().unwrap_or_default();
+        cmd = Command::new("xdg-mime");
+        cmd.arg("query").arg("default").arg(output);
+        let output = match cmd.output() {
+            Ok(output) if output.status.success() => output.stdout,
+            _ => return,
+        };
+        let Ok(output) = str::from_utf8(&output) else {
+            return;
+        };
+        let output = output.lines().next().unwrap_or_default();
+        with_desktop_file_info(Path::new(output), |desktop_file| {
+            run_desktop_file(desktop_file, &file)
+        });
+    });
+}
+
+pub fn run_desktop_file(file: &DesktopFile, path: &Path) {
+    let application = match &file.entry.entry_type {
+        EntryType::Application(application) => application,
+        _ => return,
+    };
+    let Some(ref exec) = application.exec.clone() else {
+        return;
+    };
+    let (exec, rest) = exec.split_once(' ').unwrap_or((exec, ""));
+    let mut cmd = Command::new(exec);
+    for entry in rest.split(' ').filter(|v| !v.is_empty()) {
+        if entry == "%u" || entry == "%f" || entry == "%F" || entry == "%U" {
+            cmd.arg(path);
+        } else {
+            cmd.arg(entry);
+        }
+    }
+    if application.terminal == Some(true) {
+        run_in_terminal(cmd);
+    } else {
+        run_cmd(cmd);
+    }
+}
+
+pub fn with_desktop_file_info<R>(
+    executable: &Path,
+    func: impl FnOnce(&DesktopFile) -> R,
+) -> Option<R> {
+    let executable = match executable.is_relative() {
+        false => Cow::Borrowed(executable),
+        true => Cow::Owned(locate_desktop_file(executable)?),
+    };
+    let Ok(mut cache) = DESKTOP_FILE_INFO_CACHE.write() else {
+        log::info!("failed to write to the desktop file cache");
+        return None;
+    };
+    match cache.get_cow(executable) {
+        Ok(Some(file)) => Some(func(file)),
+        _ => None,
+    }
+}
+
+type DesktopFileCache =
+    Cache<PathBuf, DesktopFile, (), fn(PathBuf) -> Result<(PathBuf, DesktopFile), ()>>;
+
+static DESKTOP_FILE_INFO_CACHE: LazyLock<RwLock<DesktopFileCache>> = LazyLock::new(|| {
+    RwLock::new(Cache::new(
+        |file| {
+            let Ok(result) = std::fs::read_to_string(&file) else {
+                return Err(());
+            };
+            let Ok(result) = freedesktop_file_parser::parse(&result) else {
+                return Err(());
+            };
+            Ok((file, result))
+        },
+        Duration::from_secs(5 * 60),
+    ))
+});

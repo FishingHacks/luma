@@ -1,5 +1,6 @@
-use std::{borrow::Cow, fmt::Debug, sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::BTreeMap, fmt::Debug, sync::Arc, time::Duration};
 
+use config::BlurAction;
 use control_plugin::ControlPlugin;
 use convert_plugin::ConvertPlugin;
 use dice_plugin::DicePlugin;
@@ -7,25 +8,25 @@ use file_plugin::{FilePlugin, IndexerMessage};
 use filter_service::{CollectorController, CollectorMessage};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-    hotkey::{Code, HotKey, Modifiers},
+    hotkey::{Code, HotKey, Modifiers as HKModifiers},
 };
 use iced::{
-    Color, Element, Length, Subscription, Task, Theme,
+    Color, Element, Length, Point, Size, Subscription, Task, Theme,
     alignment::{Horizontal, Vertical},
     futures::{SinkExt, StreamExt, channel::mpsc::Sender, future::BoxFuture},
-    keyboard::{self, Key},
-    mouse::{Interaction, ScrollDelta},
+    keyboard::{Key, Modifiers, key::Named},
+    mouse::ScrollDelta,
     stream::channel,
-    widget::{
-        MouseArea, button, column, horizontal_space, mouse_area, row, stack, text, text_input,
-    },
-    window::{self, Level, Settings},
+    widget::{MouseArea, button, column, container, mouse_area, row, stack, text, text_input},
+    window::{self, Level, Position, Settings},
 };
 use matcher::MatcherInput;
 use run_plugin::RunPlugin;
 use search_input::SearchInput;
+use special_windows::SpecialWindowState;
 use theme_plugin::ThemePlugin;
 
+mod cache;
 mod config;
 mod control_plugin;
 mod convert_plugin;
@@ -33,9 +34,11 @@ mod dice_plugin;
 mod file_index;
 mod file_plugin;
 mod filter_service;
+mod logging;
 mod matcher;
 mod run_plugin;
 mod search_input;
+mod special_windows;
 mod theme_plugin;
 mod utils;
 pub use filter_service::ResultBuilder;
@@ -55,6 +58,9 @@ pub trait AsCustomData {
 }
 
 pub trait Plugin: Send + Sync {
+    fn actions(&self) -> &'static [Action] {
+        const { &[Action::default("Default Action", "")] }
+    }
     fn prefix(&self) -> &'static str;
     fn get_for_values(
         &self,
@@ -62,14 +68,12 @@ pub trait Plugin: Send + Sync {
         builder: &ResultBuilder,
     ) -> impl std::future::Future<Output = ()> + std::marker::Send;
     fn init(&mut self);
-    fn handle(&self, thing: CustomData) -> Task<Message>;
-    fn should_close(&self) -> bool {
-        true
-    }
+    fn handle(&self, thing: CustomData, action: &'static str) -> Task<Message>;
 }
 
 pub trait AnyPlugin: Send + Sync {
     fn as_any_ref(&self) -> &dyn std::any::Any;
+    fn any_actions(&self) -> &'static [Action];
     fn any_prefix(&self) -> &'static str;
     fn any_get_for_values<'future, 'a: 'future, 'b: 'future, 'c: 'future, 'd: 'future>(
         &'a self,
@@ -77,12 +81,15 @@ pub trait AnyPlugin: Send + Sync {
         builder: &'d ResultBuilder,
     ) -> BoxFuture<'future, ()>;
     fn any_init(&mut self);
-    fn any_handle(&self, thing: CustomData) -> Task<Message>;
-    fn any_should_close(&self) -> bool;
+    fn any_handle(&self, thing: CustomData, action: &'static str) -> Task<Message>;
 }
 impl<T: Plugin + 'static> AnyPlugin for T {
     fn as_any_ref(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn any_actions(&self) -> &'static [Action] {
+        self.actions()
     }
 
     fn any_prefix(&self) -> &'static str {
@@ -101,12 +108,8 @@ impl<T: Plugin + 'static> AnyPlugin for T {
         self.init();
     }
 
-    fn any_handle(&self, thing: CustomData) -> Task<Message> {
-        self.handle(thing)
-    }
-
-    fn any_should_close(&self) -> bool {
-        self.should_close()
+    fn any_handle(&self, thing: CustomData, action: &'static str) -> Task<Message> {
+        self.handle(thing, action)
     }
 }
 
@@ -125,19 +128,21 @@ impl Clone for Box<dyn CustomDataCompatible> {
 #[derive(Debug, Clone)]
 pub enum Message {
     UpdateSearch(String),
+    SetSearch(String),
     GoUp,
     GoDown,
     Go10Up,
     Go10Down,
     Submit,
     Click(usize),
-    Hide,
+    HideMainWindow,
+    Hide(window::Id),
     Show,
-    WindowOpened(window::Id),
     ChangeTheme(Theme),
     HandleAction {
         plugin: &'static str,
         data: CustomData,
+        action: &'static str,
     },
     None,
     InputPress,
@@ -146,9 +151,11 @@ pub enum Message {
     FileIndexMessage(IndexerMessage),
     CollectorMessage(CollectorMessage),
     ResultsUpdated,
-    KeyPressed(Key, keyboard::Modifiers),
+    KeyPressed(Key, Modifiers),
     ShowActions,
     HideActions,
+    Blurred,
+    OpenSpecial(SpecialWindowState),
 }
 
 #[derive(Clone)]
@@ -205,25 +212,91 @@ pub struct State {
     collector_controller: Option<CollectorController>,
     showing_actions: bool,
     selected_action: usize,
-    num_actions: usize,
+    on_blur: BlurAction,
+    actions: &'static [Action],
+    special_windows: BTreeMap<window::Id, SpecialWindowState>,
 }
 
-const ALLOWED_ACTION_MODIFIERS: keyboard::Modifiers = keyboard::Modifiers::COMMAND
-    .union(keyboard::Modifiers::ALT)
-    .union(keyboard::Modifiers::CTRL)
-    .union(keyboard::Modifiers::LOGO);
+const ALLOWED_ACTION_MODIFIERS: Modifiers = Modifiers::COMMAND
+    .union(Modifiers::ALT)
+    .union(Modifiers::CTRL)
+    .union(Modifiers::LOGO);
 
-static ACTIONS: &[&str] = &["open (enter)", "suggest (tab)", "delete (ctrl+d)"];
+pub struct Action {
+    name: &'static str,
+    shortcut: (Modifiers, Key),
+    id: &'static str,
+    closes: bool,
+}
+
+impl Action {
+    pub const fn new(name: &'static str, id: &'static str, shortcut: (Modifiers, Key)) -> Self {
+        Self {
+            name,
+            shortcut,
+            id,
+            closes: true,
+        }
+    }
+
+    pub const fn without_shortcut(name: &'static str, id: &'static str) -> Self {
+        Self::new(name, id, (Modifiers::empty(), Key::Unidentified))
+    }
+
+    /// Constructs the suggest action (tab)
+    pub const fn suggest(name: &'static str, id: &'static str) -> Self {
+        Self::new(name, id, (Modifiers::empty(), Key::Named(Named::Tab)))
+    }
+
+    /// Constructs the default action. This should always be the first entry.
+    pub const fn default(name: &'static str, id: &'static str) -> Self {
+        Self::new(name, id, (Modifiers::empty(), Key::Named(Named::Enter)))
+    }
+
+    pub const fn keep_open(mut self) -> Self {
+        self.closes = false;
+        self
+    }
+}
+
+pub fn action_format_key(key: &Key, modifiers: Modifiers, s: &mut String) {
+    if matches!(key, Key::Unidentified) {
+        return;
+    }
+    s.push_str("  ");
+    if Modifiers::CTRL.intersects(modifiers) {
+        s.push_str("Ctrl + ");
+    }
+    if Modifiers::ALT.intersects(modifiers) {
+        s.push_str("Alt + ");
+    }
+    if Modifiers::LOGO.intersects(modifiers) {
+        #[cfg(target_os = "windows")]
+        s.push_str("Win + ");
+        #[cfg(target_os = "macos")]
+        s.push_str("Cmd + ");
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        s.push_str("Super + ");
+    }
+    use std::fmt::Write;
+    match key {
+        Key::Named(named) => {
+            write!(s, "{named:?}").expect("writing to a string should never fail!")
+        }
+        Key::Character(c) => s.push_str(c.as_str()),
+        Key::Unidentified => s.push_str("unknown key"),
+    }
+}
 
 impl State {
-    pub fn view(&self, _: window::Id) -> MouseArea<'_, Message> {
+    pub fn view(&self) -> MouseArea<'_, Message> {
         let search_field = SearchInput::new(&self.search_query, self.text_input.clone());
         let mut col = column![stack([
             search_field.into(),
-            mouse_area(horizontal_space().width(Length::Fill).height(Length::Fill))
-                .on_press(Message::InputPress)
-                .interaction(Interaction::Idle)
-                .into(),
+            // mouse_area(horizontal_space().width(Length::Fill).height(Length::Fill))
+            //     .on_press(Message::InputPress)
+            //     .interaction(Interaction::Idle)
+            //     .into(),
             text(format!("{} / {}  ", self.selected + 1, self.results.len()))
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -265,6 +338,7 @@ impl State {
             col = col.push(
                 button(inner_col)
                     .width(Length::Fill)
+                    .height(Length::Fixed(ENTRY_SIZE as f32))
                     .style(if selected {
                         button::primary
                     } else {
@@ -272,6 +346,32 @@ impl State {
                     })
                     .on_press(Message::Click(entry_idx + self.offset)),
             );
+        }
+        if self.showing_actions {
+            for (i, action) in self.actions.iter().enumerate() {
+                let mut s = String::new();
+                action_format_key(&action.shortcut.1, action.shortcut.0, &mut s);
+                let description = row![
+                    text(action.name).size(16).style(text::default),
+                    text(s).color(Color::from_rgb8(0x60, 0x60, 0x60)),
+                ]
+                .spacing(10);
+                col = col.push(
+                    button(
+                        container(description)
+                            .width(Length::Fill)
+                            .align_x(Horizontal::Center),
+                    )
+                    .width(Length::Fill)
+                    .style(if self.selected_action == i {
+                        button::primary
+                    } else {
+                        button::text
+                    })
+                    .height(Length::Fixed(ACTION_SIZE as f32))
+                    .on_press(Message::None),
+                );
+            }
         }
 
         mouse_area(col).on_scroll(|delta| {
@@ -294,25 +394,36 @@ impl State {
         if let Some(controller) = &mut self.collector_controller {
             controller.start(self.plugins.clone(), self.search_query.to_lowercase());
         } else {
-            eprintln!("Failed to query: no collector controller present");
+            log::error!("Failed to query: no collector controller present");
         }
     }
 
-    fn run(&mut self, index: usize) -> iced::Task<Message> {
+    fn run(&mut self, index: usize, action: Option<&'static str>) -> iced::Task<Message> {
         if self.results.is_empty() {
             return Task::none();
         }
         let entry = &self.results[index];
         for plugin in self.plugins.iter() {
-            if !plugin.any_should_close() && plugin.any_prefix() == entry.plugin {
-                return plugin.any_handle(entry.data.clone());
+            if plugin.any_prefix() == entry.plugin {
+                let action = action.unwrap_or(plugin.any_actions()[0].id);
+                let Some(action) = plugin.any_actions().iter().find(|v| v.id == action) else {
+                    return Task::none();
+                };
+                if action.closes {
+                    let entry = self.results.remove(index);
+                    return Task::done(Message::HideMainWindow).chain(Task::done(
+                        Message::HandleAction {
+                            plugin: entry.plugin,
+                            data: entry.data,
+                            action: action.id,
+                        },
+                    ));
+                } else {
+                    return plugin.any_handle(entry.data.clone(), action.id);
+                }
             }
         }
-        let entry = self.results.remove(index);
-        Task::done(Message::Hide).chain(Task::done(Message::HandleAction {
-            plugin: entry.plugin,
-            data: entry.data,
-        }))
+        Task::none()
     }
 
     fn handle_go_up(&mut self, amount: usize) {
@@ -325,26 +436,61 @@ impl State {
 
     fn handle_go_down(&mut self, amount: usize) {
         if self.showing_actions {
-            self.selected_action = (self.selected_action + amount).min(self.num_actions);
+            self.selected_action = (self.selected_action + amount).min(self.actions.len() - 1);
         } else {
             self.selected = (self.selected + amount).min(self.results.len() - 1);
         }
     }
 
+    fn hide_actions(&mut self) {
+        self.showing_actions = false;
+        self.selected_action = 0;
+        self.actions = &[];
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let Some(window_id) = self.window else {
+            unreachable!("the window update should always have a window")
+        };
         match message {
+            Message::SetSearch(q) => {
+                self.search_query = q;
+                self.update_matches();
+                self.selected = 0;
+                self.hide_actions();
+                let task = text_input::move_cursor_to_end(self.text_input.clone());
+                if self.search_query.is_empty() {
+                    return task.chain(window::get_size(window_id).then(move |size| {
+                        window::resize(window_id, Size::new(size.width, SEARCH_SIZE as f32))
+                    }));
+                } else {
+                    return task;
+                }
+            }
             Message::UpdateSearch(q) => {
                 self.search_query = q;
                 self.update_matches();
                 self.selected = 0;
+                self.hide_actions();
+                if self.search_query.is_empty() {
+                    return window::get_size(window_id).then(move |size| {
+                        window::resize(window_id, Size::new(size.width, SEARCH_SIZE as f32))
+                    });
+                }
             }
-            Message::KeyPressed(key, modifiers) => println!("{modifiers:?} {key:?}"),
+            Message::KeyPressed(key, modifiers) => log::debug!("{modifiers:?} {key:?}"),
             Message::ResultsUpdated => self.update_matches(),
             Message::GoUp => self.handle_go_up(1),
             Message::Go10Up => self.handle_go_up(10),
             Message::GoDown => self.handle_go_down(1),
             Message::Go10Down => self.handle_go_down(10),
-            Message::Submit => return self.run(self.selected),
+            Message::Submit => {
+                return self.run(
+                    self.selected,
+                    self.showing_actions
+                        .then(|| self.actions[self.selected_action].id),
+                );
+            }
             Message::Click(index) => {
                 self.selected = index;
                 if self.selected >= self.results.len() && !self.results.is_empty() {
@@ -356,14 +502,12 @@ impl State {
                 if self.selected >= self.offset + self.num_entries {
                     self.offset = self.selected + 1 - self.num_entries;
                 }
-                return self.run(index);
+                return self.run(index, None);
             }
-            Message::Hide => {
+            Message::HideMainWindow => {
                 self.search_query.clear();
                 self.results.clear();
-                self.showing_actions = false;
-                self.selected_action = 0;
-                self.num_actions = 0;
+                self.hide_actions();
                 if let Some(v) = self.collector_controller.as_mut() {
                     v.stop()
                 }
@@ -371,7 +515,6 @@ impl State {
                     return iced::window::close(window);
                 }
             }
-            Message::WindowOpened(id) => self.window = Some(id),
             Message::ChangeTheme(theme) => self.theme = theme,
             Message::InputPress => {
                 let Some(window) = self.window else {
@@ -380,30 +523,58 @@ impl State {
                 return text_input::focus(self.text_input.clone()).chain(window::drag(window));
             }
             Message::CollectorMessage(CollectorMessage::Finished(results)) => {
+                self.hide_actions();
                 self.results = results;
+                let new_height =
+                    (self.results.len().min(self.num_entries) * ENTRY_SIZE + SEARCH_SIZE) as f32;
+                return window::get_size(window_id).then(move |size| {
+                    window::resize(window_id, Size::new(size.width, new_height))
+                });
             }
             Message::ShowActions => {
-                self.showing_actions = true;
-                self.selected_action = 0;
-                self.num_actions = ACTIONS.len();
+                if self.results.is_empty() {
+                    return Task::none();
+                }
+                let Some(plugin) = self.get_plugin(self.results[self.selected].plugin) else {
+                    return Task::none();
+                };
+                let actions = plugin.any_actions();
+                if !self.results.is_empty() {
+                    self.showing_actions = true;
+                    self.selected_action = 0;
+                    self.actions = actions;
+                    let new_height = (self.results.len().min(self.num_entries) * ENTRY_SIZE
+                        + SEARCH_SIZE
+                        + actions.len() * ACTION_SIZE) as f32;
+                    return window::get_size(window_id).then(move |size| {
+                        window::resize(window_id, Size::new(size.width, new_height))
+                    });
+                }
             }
             Message::HideActions => {
-                self.showing_actions = false;
-                self.selected_action = 0;
-                self.num_actions = 0;
+                self.hide_actions();
+                let new_height =
+                    (self.results.len().min(self.num_entries) * ENTRY_SIZE + SEARCH_SIZE) as f32;
+                return window::get_size(window_id).then(move |size| {
+                    window::resize(window_id, Size::new(size.width, new_height))
+                });
             }
+            Message::Blurred => match self.on_blur {
+                BlurAction::Refocus => return window::gain_focus(window_id),
+                BlurAction::Hide => return Task::done(Message::HideMainWindow),
+                BlurAction::None => {}
+            },
 
             // daemon messages
             Message::Show
+            | Message::OpenSpecial(_)
+            | Message::Hide(_)
             | Message::HandleAction { .. }
             | Message::None
             | Message::Exit
             | Message::Reindex
             | Message::FileIndexMessage(_)
             | Message::CollectorMessage(CollectorMessage::Ready(_)) => unreachable!(),
-        }
-        if self.selected >= self.results.len() && !self.results.is_empty() {
-            self.selected = self.results.len() - 1;
         }
         if self.selected < self.offset {
             self.offset = self.selected;
@@ -412,6 +583,13 @@ impl State {
             self.offset = self.selected + 1 - self.num_entries;
         }
         Task::none()
+    }
+
+    pub fn get_plugin(&self, s: &str) -> Option<&dyn AnyPlugin> {
+        self.plugins
+            .iter()
+            .find(|v| v.any_prefix() == s)
+            .map(|v| &**v)
     }
 
     pub fn add_plugin<T: Plugin + Default + 'static>(&mut self) {
@@ -439,6 +617,19 @@ pub fn change_theme(new_theme: Theme) -> Task<Message> {
 
 const SEARCH_SIZE: usize = 31;
 const ENTRY_SIZE: usize = 56;
+const ACTION_SIZE: usize = 31;
+
+fn daemon_view(state: &State, id: window::Id) -> Element<'_, Message> {
+    if let Some(main_window_id) = state.window {
+        if id == main_window_id {
+            return state.view().into();
+        }
+    }
+    if let Some(state) = state.special_windows.get(&id) {
+        return state.view(id);
+    }
+    text(format!("No state was found for this window. {id:?}")).into()
+}
 
 fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
     match message {
@@ -447,10 +638,19 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 resizable: false,
                 decorations: false,
                 level: Level::AlwaysOnTop,
+                position: Position::SpecificWith(|winsize, resolution| {
+                    Point::new(
+                        (resolution.width - winsize.width).max(0.0) / 2.0,
+                        (resolution.height - SEARCH_SIZE as f32 - 12.0 * ENTRY_SIZE as f32)
+                            .max(0.0)
+                            / 2.0,
+                    )
+                }),
                 ..Default::default()
             };
-            settings.size.height = (SEARCH_SIZE + ENTRY_SIZE * state.num_entries + 200) as f32;
+            settings.size.height = SEARCH_SIZE as f32;
             let (id, task) = window::open(settings);
+            log::trace!("opened main window with id {id:?}");
             let old_window = state.window.replace(id);
             state.init_plugins();
             let task = task
@@ -461,16 +661,21 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 None => task,
             }
         }
+        Message::Hide(window_id) => {
+            state.special_windows.remove(&window_id);
+            window::close(window_id)
+        }
         Message::HandleAction {
             plugin: plugin_prefix,
             data,
+            action,
         } => {
             for plugin in state.plugins.iter() {
                 if plugin.any_prefix() == plugin_prefix {
-                    return plugin.any_handle(data);
+                    return plugin.any_handle(data, action);
                 }
             }
-            println!("Err: No plugin called '{plugin_prefix}' found!");
+            log::warn!("Err: No plugin called '{plugin_prefix}' found!");
             Task::none()
         }
         Message::Exit => iced::exit(),
@@ -481,7 +686,7 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 Ok(_) => Task::none(),
                 Err(e) if e.is_full() => Task::none(),
                 Err(e) => {
-                    eprintln!("Faiiled to request a file reindex: {e:?}");
+                    log::error!("Failed to request a file reindex: {e:?}");
                     state.index_sender = None;
                     Task::none()
                 }
@@ -499,11 +704,27 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             state.collector_controller = Some(controller);
             Task::none()
         }
+        Message::OpenSpecial(window_state) => {
+            let (id, task) = if let Some(size) = window_state.size() {
+                window::open(Settings {
+                    size,
+                    resizable: false,
+                    level: Level::AlwaysOnTop,
+                    ..Default::default()
+                })
+            } else {
+                window::open(Settings::default())
+            };
+            log::trace!("Opened special window {window_state:?} {id:?}");
+            state.special_windows.insert(id, window_state);
+            task.map(|_| Message::None)
+        }
+        _ if state.window.is_none() => Task::none(),
         _ => state.update(message),
     }
 }
 
-const fn make_hotkey(mods: Modifiers, key: Code) -> HotKey {
+const fn make_hotkey(mods: HKModifiers, key: Code) -> HotKey {
     HotKey {
         mods,
         key,
@@ -511,19 +732,24 @@ const fn make_hotkey(mods: Modifiers, key: Code) -> HotKey {
     }
 }
 
-static HOTKEY: HotKey = make_hotkey(Modifiers::ALT, Code::KeyP);
+static HOTKEY: HotKey = make_hotkey(HKModifiers::ALT, Code::KeyP);
 
 fn main() -> iced::Result {
+    logging::init();
     let manager = GlobalHotKeyManager::new().expect("failed to start the hotkey manager");
     manager
         .register(HOTKEY)
         .expect("failed to register the hotkey");
 
-    iced::daemon("spotlight", daemon_update, State::view)
+    iced::daemon("spotlight", daemon_update, daemon_view)
         .theme(|s, _| s.theme.clone())
         .subscription(|_| {
             Subscription::batch([
-                window::open_events().map(Message::WindowOpened),
+                window::events().map(|ev| match ev.1 {
+                    window::Event::Unfocused => Message::Blurred,
+                    window::Event::Closed => Message::Hide(ev.0),
+                    _ => Message::None,
+                }),
                 hotkey_sub().map(|ev| {
                     if ev.state() == HotKeyState::Pressed && ev.id == HOTKEY.id {
                         Message::Show
@@ -536,6 +762,13 @@ fn main() -> iced::Result {
                     .map(|_| Message::Reindex),
                 // Subscription::run(file_plugin::start_indexer).map(Message::FileIndexMessage),
                 Subscription::run(filter_service::collector).map(Message::CollectorMessage),
+                Subscription::run(|| {
+                    channel(100, |mut sender| async move {
+                        logging::register_message_sender(move |message| {
+                            _ = sender.try_send(message);
+                        });
+                    })
+                }),
             ])
         })
         .run_with(move || {
@@ -555,7 +788,9 @@ fn main() -> iced::Result {
                 collector_controller: None,
                 showing_actions: false,
                 selected_action: 0,
-                num_actions: 0,
+                on_blur: BlurAction::Refocus,
+                actions: &[],
+                special_windows: BTreeMap::new(),
             };
             state.add_plugin::<RunPlugin>();
             state.add_plugin::<ConvertPlugin>();

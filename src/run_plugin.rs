@@ -1,15 +1,22 @@
-use std::{collections::HashSet, process::Command};
+use std::{collections::HashSet, path::PathBuf, process::Command};
 
 use freedesktop_file_parser::EntryType;
-use iced::Task;
+use iced::{
+    Task,
+    advanced::graphics::core::SmolStr,
+    keyboard::{Key, Modifiers},
+};
 
-use crate::{CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput, utils};
+use crate::{
+    Action, CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput, utils,
+};
 
 struct FileEntry {
     name: String,
     terminal: bool,
     exec: String,
     description: String,
+    path: PathBuf,
 }
 
 #[derive(Default)]
@@ -48,12 +55,16 @@ impl Plugin for RunPlugin {
             let Ok(dirent) = dir.read_dir() else { continue };
             for entry in dirent {
                 let Ok(entry) = entry else { continue };
-                let Ok(contents) = std::fs::read_to_string(entry.path()) else {
+                let path = entry.path();
+                let Ok(contents) = std::fs::read_to_string(&path) else {
                     continue;
                 };
                 let Ok(parsed) = freedesktop_file_parser::parse(&contents) else {
                     continue;
                 };
+                if parsed.entry.no_display.unwrap_or(false) {
+                    continue;
+                }
                 let application = match parsed.entry.entry_type {
                     EntryType::Application(application) => application,
                     _ => continue,
@@ -87,25 +98,44 @@ impl Plugin for RunPlugin {
                         .comment
                         .map(|v| v.get_variant("en").to_string())
                         .unwrap_or_default(),
+                    path,
                 });
             }
         }
         self.files = file_entries;
     }
 
-    fn handle(&self, thing: CustomData) -> iced::Task<Message> {
+    fn handle(&self, thing: CustomData, action: &str) -> iced::Task<Message> {
         let file = &self.files[thing.into::<usize>()];
-        let mut split = file.exec.split(' ');
-        let Some(command) = split.next() else {
-            return Task::none();
-        };
-        let mut command = Command::new(command);
-        command.args(split);
-        if file.terminal {
-            utils::run_in_terminal(command);
+
+        if action == "run" {
+            let mut split = file.exec.split(' ');
+            let Some(command) = split.next() else {
+                return Task::none();
+            };
+            let mut command = Command::new(command);
+            command.args(split);
+            if file.terminal {
+                utils::run_in_terminal(command);
+            } else {
+                utils::run_cmd(command);
+            }
         } else {
-            utils::run_cmd(command);
+            utils::open_file(&file.path);
         }
         Task::none()
+    }
+
+    fn actions(&self) -> &'static [Action] {
+        const {
+            &[
+                Action::default("Run Program", "run"),
+                Action::new(
+                    "Open Desktop Entry",
+                    "open",
+                    (Modifiers::CTRL, Key::Character(SmolStr::new_inline("o"))),
+                ),
+            ]
+        }
     }
 }
