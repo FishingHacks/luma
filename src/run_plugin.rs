@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf, process::Command};
+use std::{collections::HashSet, path::Path, process::Command, sync::Arc};
 
 use freedesktop_file_parser::EntryType;
 use iced::{
@@ -12,11 +12,11 @@ use crate::{
 };
 
 struct FileEntry {
-    name: String,
+    name: Arc<str>,
     terminal: bool,
-    exec: String,
-    description: String,
-    path: PathBuf,
+    exec: Arc<str>,
+    description: Arc<str>,
+    path: Arc<Path>,
 }
 
 #[derive(Default)]
@@ -40,7 +40,7 @@ impl Plugin for RunPlugin {
                     || (input.matches(&v.description) && !v.description.is_empty())
             })
             .map(|(i, v)| Entry {
-                name: v.name.clone(),
+                name: v.name.clone().into(),
                 subtitle: v.description.clone().into(),
                 plugin: self.prefix(),
                 data: CustomData::new(i),
@@ -90,22 +90,22 @@ impl Plugin for RunPlugin {
                     exec.replace_range(pos..pos + 2, "");
                 }
                 file_entries.push(FileEntry {
-                    name: name.to_string(),
+                    name: name.into(),
                     terminal: application.terminal.unwrap_or(false),
-                    exec,
+                    exec: exec.into(),
                     description: parsed
                         .entry
                         .comment
-                        .map(|v| v.get_variant("en").to_string())
+                        .map(|v| v.get_variant("en").into())
                         .unwrap_or_default(),
-                    path,
+                    path: path.into(),
                 });
             }
         }
         self.files = file_entries;
     }
 
-    fn handle(&self, thing: CustomData, action: &str) -> iced::Task<Message> {
+    fn handle_pre(&self, thing: CustomData, action: &str) -> iced::Task<Message> {
         let file = &self.files[thing.into::<usize>()];
 
         if action == "run" {
@@ -121,7 +121,7 @@ impl Plugin for RunPlugin {
                 utils::run_cmd(command);
             }
         } else {
-            utils::open_file(&file.path);
+            utils::open_file(&*file.path);
         }
         Task::none()
     }

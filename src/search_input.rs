@@ -112,13 +112,16 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
                     ..
                 }) => {
                     let is_ctrl = *modifiers == Modifiers::CTRL;
+                    let is_ctrl_shift = *modifiers == Modifiers::CTRL.union(Modifiers::SHIFT);
                     match key {
                         Key::Named(Named::ArrowLeft | Named::ArrowRight | Named::Backspace)
-                            if is_ctrl =>
+                            if is_ctrl || is_ctrl_shift =>
                         {
                             break 'blk false;
                         }
-                        Key::Character(c) if is_ctrl && (c == "a" || c == "c" || c == "x") => {
+                        Key::Character(c)
+                            if is_ctrl && (c == "a" || c == "c" || c == "x" || c == "v") =>
+                        {
                             break 'blk false;
                         }
                         Key::Named(Named::Enter) => shell.publish(Message::Submit),

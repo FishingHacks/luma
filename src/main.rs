@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::BTreeMap, fmt::Debug, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fmt::Debug, sync::Arc, time::Duration};
 
 use config::BlurAction;
 use control_plugin::ControlPlugin;
@@ -21,6 +21,7 @@ use iced::{
     window::{self, Level, Position, Settings},
 };
 use matcher::MatcherInput;
+use plugin::StringLike;
 use run_plugin::RunPlugin;
 use search_input::SearchInput;
 use special_windows::SpecialWindowState;
@@ -36,6 +37,7 @@ mod file_plugin;
 mod filter_service;
 mod logging;
 mod matcher;
+mod plugin;
 mod run_plugin;
 mod search_input;
 mod special_windows;
@@ -68,7 +70,14 @@ pub trait Plugin: Send + Sync {
         builder: &ResultBuilder,
     ) -> impl std::future::Future<Output = ()> + std::marker::Send;
     fn init(&mut self);
-    fn handle(&self, thing: CustomData, action: &'static str) -> Task<Message>;
+    #[allow(unused_variables)]
+    fn handle_pre(&self, thing: CustomData, action: &'static str) -> Task<Message> {
+        Task::none()
+    }
+    #[allow(unused_variables)]
+    fn handle_post(&self, thing: CustomData, action: &'static str) -> Task<Message> {
+        Task::none()
+    }
 }
 
 pub trait AnyPlugin: Send + Sync {
@@ -81,7 +90,8 @@ pub trait AnyPlugin: Send + Sync {
         builder: &'d ResultBuilder,
     ) -> BoxFuture<'future, ()>;
     fn any_init(&mut self);
-    fn any_handle(&self, thing: CustomData, action: &'static str) -> Task<Message>;
+    fn any_handle_pre(&self, thing: CustomData, action: &'static str) -> Task<Message>;
+    fn any_handle_post(&self, thing: CustomData, action: &'static str) -> Task<Message>;
 }
 impl<T: Plugin + 'static> AnyPlugin for T {
     fn as_any_ref(&self) -> &dyn std::any::Any {
@@ -108,8 +118,11 @@ impl<T: Plugin + 'static> AnyPlugin for T {
         self.init();
     }
 
-    fn any_handle(&self, thing: CustomData, action: &'static str) -> Task<Message> {
-        self.handle(thing, action)
+    fn any_handle_pre(&self, thing: CustomData, action: &'static str) -> Task<Message> {
+        self.handle_pre(thing, action)
+    }
+    fn any_handle_post(&self, thing: CustomData, action: &'static str) -> Task<Message> {
+        self.handle_post(thing, action)
     }
 }
 
@@ -175,16 +188,16 @@ impl CustomData {
 
 #[derive(Debug, Clone)]
 pub struct Entry {
-    name: String,
-    subtitle: Cow<'static, str>,
+    name: StringLike,
+    subtitle: StringLike,
     plugin: &'static str,
     data: CustomData,
 }
 
 impl Entry {
     pub fn new(
-        name: impl Into<String>,
-        subtitle: impl Into<Cow<'static, str>>,
+        name: impl Into<StringLike>,
+        subtitle: impl Into<StringLike>,
         plugin: &'static str,
         data: CustomData,
     ) -> Self {
@@ -320,7 +333,7 @@ impl State {
                 row![
                     text(entry.plugin).size(16).style(text::default),
                     text(" • ").size(16),
-                    text(entry.subtitle.as_ref())
+                    text(&*entry.subtitle)
                         .size(16)
                         .wrapping(text::Wrapping::None),
                 ]
@@ -329,7 +342,7 @@ impl State {
                 .into()
             };
             let inner_col = column![
-                text(&entry.name)
+                text(&*entry.name)
                     .size(20)
                     .height(25)
                     .wrapping(text::Wrapping::None),
@@ -411,15 +424,20 @@ impl State {
                 };
                 if action.closes {
                     let entry = self.results.remove(index);
-                    return Task::done(Message::HideMainWindow).chain(Task::done(
-                        Message::HandleAction {
+                    return Task::batch([
+                        plugin.any_handle_pre(entry.data.clone(), action.id),
+                        Task::done(Message::HideMainWindow),
+                        Task::done(Message::HandleAction {
                             plugin: entry.plugin,
                             data: entry.data,
                             action: action.id,
-                        },
-                    ));
+                        }),
+                    ]);
                 } else {
-                    return plugin.any_handle(entry.data.clone(), action.id);
+                    return Task::batch([
+                        plugin.any_handle_pre(entry.data.clone(), action.id),
+                        plugin.any_handle_post(entry.data.clone(), action.id),
+                    ]);
                 }
             }
         }
@@ -460,9 +478,12 @@ impl State {
                 self.hide_actions();
                 let task = text_input::move_cursor_to_end(self.text_input.clone());
                 if self.search_query.is_empty() {
-                    return task.chain(window::get_size(window_id).then(move |size| {
-                        window::resize(window_id, Size::new(size.width, SEARCH_SIZE as f32))
-                    }));
+                    return Task::batch([
+                        task,
+                        window::get_size(window_id).then(move |size| {
+                            window::resize(window_id, Size::new(size.width, SEARCH_SIZE as f32))
+                        }),
+                    ]);
                 } else {
                     return task;
                 }
@@ -478,7 +499,22 @@ impl State {
                     });
                 }
             }
-            Message::KeyPressed(key, modifiers) => log::debug!("{modifiers:?} {key:?}"),
+            Message::KeyPressed(key, modifiers) => {
+                if let Some(action) = self
+                    .results
+                    .get(self.selected)
+                    .and_then(|v| self.get_plugin(v.plugin))
+                    .and_then(|plugin| {
+                        plugin
+                            .any_actions()
+                            .iter()
+                            .find(|v| v.shortcut.0 == modifiers && v.shortcut.1 == key)
+                    })
+                    .map(|v| v.id)
+                {
+                    return self.run(self.selected, Some(action));
+                }
+            }
             Message::ResultsUpdated => self.update_matches(),
             Message::GoUp => self.handle_go_up(1),
             Message::Go10Up => self.handle_go_up(10),
@@ -520,7 +556,10 @@ impl State {
                 let Some(window) = self.window else {
                     return text_input::focus(self.text_input.clone());
                 };
-                return text_input::focus(self.text_input.clone()).chain(window::drag(window));
+                return Task::batch([
+                    text_input::focus(self.text_input.clone()),
+                    window::drag(window),
+                ]);
             }
             Message::CollectorMessage(CollectorMessage::Finished(results)) => {
                 self.hide_actions();
@@ -649,16 +688,15 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 ..Default::default()
             };
             settings.size.height = SEARCH_SIZE as f32;
-            let (id, task) = window::open(settings);
+            let (id, open_window_task) = window::open(settings);
+            let open_window_task = open_window_task.map(|_| Message::None);
             log::trace!("opened main window with id {id:?}");
             let old_window = state.window.replace(id);
             state.init_plugins();
-            let task = task
-                .chain(text_input::focus(state.text_input.clone()))
-                .map(|_| Message::None);
+            let focus_task = text_input::focus(state.text_input.clone()).map(|_: ()| Message::None);
             match old_window {
-                Some(id) => window::close(id).chain(task),
-                None => task,
+                Some(id) => Task::batch([window::close(id), open_window_task, focus_task]),
+                None => Task::batch([open_window_task, focus_task]),
             }
         }
         Message::Hide(window_id) => {
@@ -672,7 +710,7 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
         } => {
             for plugin in state.plugins.iter() {
                 if plugin.any_prefix() == plugin_prefix {
-                    return plugin.any_handle(data, action);
+                    return plugin.any_handle_post(data, action);
                 }
             }
             log::warn!("Err: No plugin called '{plugin_prefix}' found!");
@@ -792,10 +830,10 @@ fn main() -> iced::Result {
                 actions: &[],
                 special_windows: BTreeMap::new(),
             };
+            state.add_plugin::<ControlPlugin>();
+            state.add_plugin::<ThemePlugin>();
             state.add_plugin::<RunPlugin>();
             state.add_plugin::<ConvertPlugin>();
-            state.add_plugin::<ThemePlugin>();
-            state.add_plugin::<ControlPlugin>();
             state.add_plugin::<FilePlugin>();
             state.add_plugin::<DicePlugin>();
             (state, text_input::focus(text_input_id))

@@ -53,4 +53,16 @@ impl<K: Hash + Eq, V, E, F: FnMut(K) -> Result<(K, V), E>> Cache<K, V, E, F> {
         let (k, v) = (self.fetcher)(key)?;
         Ok(Some(&self.inner.entry(k).or_insert((v, Instant::now())).0))
     }
+
+    pub fn get_owned(&mut self, key: K) -> Result<Option<&V>, E> {
+        if let Some((_, cached_at)) = self.inner.get(&key) {
+            let now = Instant::now();
+            if now <= *cached_at || now.duration_since(*cached_at) < self.expires_after {
+                return Ok(Some(&self.inner.get(&key).unwrap().0));
+            }
+            self.inner.remove(&key);
+        }
+        let (k, v) = (self.fetcher)(key)?;
+        Ok(Some(&self.inner.entry(k).or_insert((v, Instant::now())).0))
+    }
 }

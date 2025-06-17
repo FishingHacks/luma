@@ -1,13 +1,6 @@
 // File plugin to search and index the entire drive (except a few directories)
 
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-    env::home_dir,
-    ffi::OsStr,
-    path::{Path, PathBuf},
-    time::{Instant, SystemTime},
-};
+use std::{collections::HashSet, env::home_dir, ffi::OsStr, path::Path, sync::Arc, time::Instant};
 
 use iced::{
     Task,
@@ -20,7 +13,8 @@ use iced::{
 use smol::{lock::RwLock, stream::StreamExt as _};
 
 use crate::{
-    Action, CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput, utils,
+    Action, CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput,
+    plugin::StringLike, utils,
 };
 
 static IGNORED_DIRECTORIES: &[&str] = &["node_modules", "target"];
@@ -62,7 +56,7 @@ pub fn start_indexer() -> impl Stream<Item = IndexerMessage> {
             let elapsed = now.elapsed();
             let index = indexer.finish();
             log::info!(
-                "Indexed {} File(s) and {} Directorie(s) in {elapsed:?}",
+                "Indexed {} File(s) and {} Directorie(s) in {elapsed:.3?}",
                 index.files.len(),
                 index.directories.len(),
             );
@@ -86,14 +80,14 @@ pub fn start_indexer() -> impl Stream<Item = IndexerMessage> {
 }
 
 pub struct FileIndex {
-    pub directories: Vec<PathBuf>,
-    pub files: Vec<PathBuf>,
+    pub directories: Vec<Arc<Path>>,
+    pub files: Vec<Arc<Path>>,
 }
 
 pub struct Indexer {
-    directory_queue: Vec<PathBuf>,
-    files: HashSet<PathBuf>,
-    directories: HashSet<PathBuf>,
+    directory_queue: Vec<Arc<Path>>,
+    files: HashSet<Arc<Path>>,
+    directories: HashSet<Arc<Path>>,
 }
 
 fn should_scan(path: &Path) -> bool {
@@ -109,7 +103,12 @@ impl Indexer {
             panic!("Home directory not set")
         };
         Self {
-            directory_queue: vec!["/mnt".into(), "/run/media".into(), "/media".into(), homedir],
+            directory_queue: vec![
+                Path::new("/mnt").into(),
+                Path::new("/run/media").into(),
+                Path::new("/media").into(),
+                homedir.into(),
+            ],
             files: HashSet::new(),
             directories: HashSet::new(),
         }
@@ -140,11 +139,13 @@ impl Indexer {
             let Ok(ftype) = entry.file_type().await else {
                 continue;
             };
-            if ftype.is_dir() && self.directories.insert(entry.path()) {
-                self.directory_queue.push(entry.path());
+            let path: Arc<Path> = entry.path().into();
+            if ftype.is_dir() && self.directories.insert(path.clone()) {
+                self.directory_queue.push(path);
+                continue;
             }
             if ftype.is_file() {
-                self.files.insert(entry.path());
+                self.files.insert(path);
             }
         }
         true
@@ -165,6 +166,26 @@ impl Indexer {
 #[derive(Default)]
 pub struct FilePlugin;
 
+fn iter<'a>(
+    input: &MatcherInput,
+    iter: impl Iterator<Item = (usize, &'a Arc<Path>)>,
+) -> impl Iterator<Item = Entry> {
+    iter.filter(|(_, path)| path_matches(input, path))
+        .map(|(i, v)| (i, v.clone(), v.file_name().map(|v| v.len()).unwrap_or(0)))
+        .map(|(i, v, filename_len)| {
+            let mut name = StringLike::from(v.clone());
+            name.substr((name.len() - filename_len) as u16..);
+            let mut subtitle = StringLike::from(v);
+            subtitle.substr(..(subtitle.len() - filename_len) as u16);
+            Entry {
+                name,
+                subtitle,
+                plugin: FilePlugin.prefix(),
+                data: CustomData::new((true, i)),
+            }
+        })
+}
+
 impl Plugin for FilePlugin {
     #[inline(always)]
     fn prefix(&self) -> &'static str {
@@ -173,36 +194,14 @@ impl Plugin for FilePlugin {
 
     async fn get_for_values(&self, input: &MatcherInput<'_>, builder: &ResultBuilder) {
         let reader = FILE_INDEX.read_blocking();
-        let dirs = reader
-            .directories
-            .iter()
-            .enumerate()
-            .filter(|(_, path)| path_matches(input, path))
-            .filter_map(|(i, v)| Some((i, v.as_os_str().to_str()?)))
-            .map(|(i, v)| Entry {
-                name: v.to_string(),
-                subtitle: Cow::Borrowed(""),
-                plugin: self.prefix(),
-                data: CustomData::new((false, i)),
-            });
-        let files = reader
-            .files
-            .iter()
-            .enumerate()
-            .filter(|(_, path)| path_matches(input, path))
-            .filter_map(|(i, v)| Some((i, v.as_os_str().to_str()?)))
-            .map(|(i, v)| Entry {
-                name: v.to_string(),
-                subtitle: Cow::Borrowed(""),
-                plugin: self.prefix(),
-                data: CustomData::new((true, i)),
-            });
-        builder.commit(dirs.chain(files)).await
+        let files = iter(input, reader.files.iter().enumerate());
+        let iter = iter(input, reader.directories.iter().enumerate()).chain(files);
+        builder.commit(iter).await
     }
 
     fn init(&mut self) {}
 
-    fn handle(&self, thing: CustomData, _: &str) -> Task<Message> {
+    fn handle_pre(&self, thing: CustomData, _: &str) -> Task<Message> {
         let (is_file, index) = thing.into::<(bool, usize)>();
         let reader = FILE_INDEX.read_blocking();
         let arr = if is_file {
@@ -213,7 +212,7 @@ impl Plugin for FilePlugin {
         if arr.len() <= index {
             return Task::none();
         }
-        utils::open_file(&arr[index]);
+        utils::open_file(&*arr[index]);
         drop(reader);
         Task::none()
     }

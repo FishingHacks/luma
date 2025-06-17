@@ -1,14 +1,13 @@
 use std::{
-    borrow::Cow,
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     ops::Deref,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{LazyLock, RwLock},
+    sync::{Arc, LazyLock, RwLock},
     time::Duration,
 };
 
-use freedesktop_file_parser::{DesktopFile, EntryType};
+use freedesktop_file_parser::EntryType;
 
 use crate::cache::Cache;
 
@@ -99,6 +98,15 @@ pub fn run_in_terminal(cmd: Command) {
             .arg("-e")
             .arg(cmd.get_program())
             .args(cmd.get_args());
+        if let Some(curdir) = cmd.get_current_dir() {
+            command.current_dir(curdir);
+        }
+        for (k, v) in cmd.get_envs() {
+            match v {
+                Some(v) => command.env(k, v),
+                None => command.env_remove(k),
+            };
+        }
         run_cmd(command);
     } else {
         log::warn!("cannot run {cmd:?} in terminal because none is set.");
@@ -135,14 +143,7 @@ pub fn open_file(file: impl Into<PathBuf>) {
 }
 
 pub fn run_desktop_file(file: &DesktopFile, path: &Path) {
-    let application = match &file.entry.entry_type {
-        EntryType::Application(application) => application,
-        _ => return,
-    };
-    let Some(ref exec) = application.exec.clone() else {
-        return;
-    };
-    let (exec, rest) = exec.split_once(' ').unwrap_or((exec, ""));
+    let (exec, rest) = file.exec.split_once(' ').unwrap_or((&file.exec, ""));
     let mut cmd = Command::new(exec);
     for entry in rest.split(' ').filter(|v| !v.is_empty()) {
         if entry == "%u" || entry == "%f" || entry == "%F" || entry == "%U" {
@@ -151,7 +152,10 @@ pub fn run_desktop_file(file: &DesktopFile, path: &Path) {
             cmd.arg(entry);
         }
     }
-    if application.terminal == Some(true) {
+    if let Some(cwd) = &file.cwd {
+        cmd.current_dir(Path::new(&**cwd));
+    }
+    if file.terminal {
         run_in_terminal(cmd);
     } else {
         run_cmd(cmd);
@@ -162,22 +166,63 @@ pub fn with_desktop_file_info<R>(
     executable: &Path,
     func: impl FnOnce(&DesktopFile) -> R,
 ) -> Option<R> {
-    let executable = match executable.is_relative() {
-        false => Cow::Borrowed(executable),
-        true => Cow::Owned(locate_desktop_file(executable)?),
-    };
+    if executable.is_relative() {
+        let file = locate_desktop_file(executable)?.into();
+        let Ok(mut cache) = DESKTOP_FILE_INFO_CACHE.write() else {
+            log::info!("failed to write to the desktop file cache");
+            return None;
+        };
+        return match cache.get_owned(file) {
+            Ok(Some(file)) => Some(func(file)),
+            _ => None,
+        };
+    }
     let Ok(mut cache) = DESKTOP_FILE_INFO_CACHE.write() else {
         log::info!("failed to write to the desktop file cache");
         return None;
     };
-    match cache.get_cow(executable) {
+    match cache.get(executable, |v| v.into()) {
         Ok(Some(file)) => Some(func(file)),
         _ => None,
     }
 }
 
+pub struct DesktopFile {
+    name: Arc<str>,
+    description: Arc<str>,
+    hidden: bool,
+    exec: Arc<str>,
+    cwd: Option<Arc<str>>,
+    terminal: bool,
+}
+
+impl TryFrom<freedesktop_file_parser::DesktopFile> for DesktopFile {
+    type Error = ();
+
+    fn try_from(value: freedesktop_file_parser::DesktopFile) -> Result<Self, Self::Error> {
+        let EntryType::Application(app) = value.entry.entry_type else {
+            return Err(());
+        };
+        Ok(Self {
+            name: value.entry.name.get_variant("").into(),
+            description: value
+                .entry
+                .comment
+                .map(|v| Arc::<_>::from(v.get_variant("")))
+                .unwrap_or_default(),
+            hidden: value.entry.no_display.unwrap_or(false) || value.entry.hidden.unwrap_or(false),
+            exec: match (app.exec, app.try_exec) {
+                (Some(v), _) | (None, Some(v)) => v.into(),
+                (None, None) => return Err(()),
+            },
+            terminal: app.terminal.unwrap_or_default(),
+            cwd: app.path.map(Into::into),
+        })
+    }
+}
+
 type DesktopFileCache =
-    Cache<PathBuf, DesktopFile, (), fn(PathBuf) -> Result<(PathBuf, DesktopFile), ()>>;
+    Cache<Arc<Path>, DesktopFile, (), fn(Arc<Path>) -> Result<(Arc<Path>, DesktopFile), ()>>;
 
 static DESKTOP_FILE_INFO_CACHE: LazyLock<RwLock<DesktopFileCache>> = LazyLock::new(|| {
     RwLock::new(Cache::new(
@@ -188,7 +233,7 @@ static DESKTOP_FILE_INFO_CACHE: LazyLock<RwLock<DesktopFileCache>> = LazyLock::n
             let Ok(result) = freedesktop_file_parser::parse(&result) else {
                 return Err(());
             };
-            Ok((file, result))
+            Ok((file, result.try_into()?))
         },
         Duration::from_secs(5 * 60),
     ))

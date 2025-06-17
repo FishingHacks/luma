@@ -1,4 +1,4 @@
-use std::{borrow::Cow, iter};
+use std::iter;
 
 use iced::{Task, clipboard};
 
@@ -44,8 +44,8 @@ impl Plugin for ConvertPlugin {
                 let result = amount * conversion.2;
                 return builder
                     .commit(iter::once(Entry {
-                        name: format!("{} {}", result, conversion.1),
-                        subtitle: Cow::Owned(format!("Converted from {} {}", amount, conversion.0)),
+                        name: format!("{} {}", result, conversion.1).into(),
+                        subtitle: format!("Converted from {} {}", amount, conversion.0).into(),
                         plugin: self.prefix(),
                         data: CustomData::new((result, conversion.1)),
                     }))
@@ -56,7 +56,7 @@ impl Plugin for ConvertPlugin {
 
     fn init(&mut self) {}
 
-    fn handle(&self, thing: CustomData, action: &str) -> iced::Task<Message> {
+    fn handle_pre(&self, thing: CustomData, action: &str) -> iced::Task<Message> {
         if action == "copy" {
             let result = thing.into::<(f64, &'static str)>();
             let value = if result.0 == result.0.floor() {

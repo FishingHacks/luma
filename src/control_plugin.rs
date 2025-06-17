@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use iced::Task;
 
 use crate::{CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput};
@@ -43,8 +41,8 @@ impl Plugin for ControlPlugin {
             .iter()
             .filter(|&action| input.matches(action.get_name()))
             .map(|action| Entry {
-                name: action.get_name().to_string(),
-                subtitle: Cow::Borrowed(action.get_description()),
+                name: action.get_name().into(),
+                subtitle: action.get_description().into(),
                 plugin: self.prefix(),
                 data: CustomData::new(*action),
             });
@@ -53,7 +51,7 @@ impl Plugin for ControlPlugin {
 
     fn init(&mut self) {}
 
-    fn handle(&self, thing: CustomData, _: &str) -> iced::Task<Message> {
+    fn handle_pre(&self, thing: CustomData, _: &str) -> iced::Task<Message> {
         match thing.into::<Action>() {
             Action::Quit => Task::done(Message::Exit),
             Action::Hide => Task::done(Message::HideMainWindow),

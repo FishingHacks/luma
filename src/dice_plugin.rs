@@ -2,7 +2,9 @@ use iced::clipboard;
 use rand::Rng;
 use std::fmt::Write;
 
-use crate::{Action, CustomData, Entry, Plugin, ResultBuilder, matcher::MatcherInput};
+use crate::{
+    Action, CustomData, Entry, Plugin, ResultBuilder, matcher::MatcherInput, plugin::StringLike,
+};
 
 #[derive(Default)]
 pub struct DicePlugin;
@@ -27,8 +29,8 @@ impl Plugin for DicePlugin {
             entries.insert(
                 0,
                 Entry {
-                    name: format!("Overall Total:  {}", total),
-                    subtitle: "".into(),
+                    name: format!("Overall Total:  {}", total).into(),
+                    subtitle: StringLike::Empty,
                     plugin: self.prefix(),
                     data: CustomData::new(total),
                 },
@@ -39,7 +41,7 @@ impl Plugin for DicePlugin {
 
     fn init(&mut self) {}
 
-    fn handle(&self, thing: crate::CustomData, _: &str) -> iced::Task<crate::Message> {
+    fn handle_pre(&self, thing: crate::CustomData, _: &str) -> iced::Task<crate::Message> {
         clipboard::write(format!("{}", thing.into::<usize>()))
     }
 
@@ -72,7 +74,7 @@ fn roll(s: &str) -> Option<(Entry, usize)> {
 
     Some((
         Entry {
-            name: format!("Rolled {}d{} - Total: {}", dice, sides, result),
+            name: format!("Rolled {}d{} - Total: {}", dice, sides, result).into(),
             subtitle: subtitle.into(),
             plugin: DicePlugin.prefix(),
             data: CustomData::new(result),

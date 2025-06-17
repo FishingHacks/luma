@@ -1,8 +1,11 @@
-use std::{borrow::Cow, sync::LazyLock};
+use std::sync::LazyLock;
 
 use iced::{Task, Theme};
 
-use crate::{Action, CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput};
+use crate::{
+    Action, CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput,
+    plugin::StringLike,
+};
 
 static THEMES: LazyLock<Vec<(String, Theme)>> = LazyLock::new(|| {
     Theme::ALL
@@ -25,8 +28,8 @@ impl Plugin for ThemePlugin {
             .iter()
             .filter(|&v| input.matches(&v.0))
             .map(|v| Entry {
-                name: v.0.clone(),
-                subtitle: Cow::Borrowed(""),
+                name: v.0.clone().into(),
+                subtitle: StringLike::Empty,
                 plugin: self.prefix(),
                 data: CustomData::new(v.1.clone()),
             });
@@ -35,7 +38,7 @@ impl Plugin for ThemePlugin {
 
     fn init(&mut self) {}
 
-    fn handle(&self, thing: CustomData, _: &str) -> iced::Task<Message> {
+    fn handle_pre(&self, thing: CustomData, _: &str) -> iced::Task<Message> {
         Task::done(Message::ChangeTheme(thing.into()))
     }
 
