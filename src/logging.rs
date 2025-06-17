@@ -1,13 +1,18 @@
 use std::{
     fs::OpenOptions,
+    path::PathBuf,
     process::Command,
-    sync::{OnceLock, RwLock},
+    sync::{LazyLock, OnceLock, RwLock},
 };
 
 use env_logger::{Target, WriteStyle};
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
-use crate::{Message, special_windows::SpecialWindowState, utils};
+use crate::{
+    Message,
+    special_windows::SpecialWindowState,
+    utils::{self, CRATE_NAME},
+};
 
 pub struct Logger {
     stderr: env_logger::Logger,
@@ -16,7 +21,7 @@ pub struct Logger {
 
 #[allow(clippy::type_complexity)]
 static SENDER: OnceLock<RwLock<Box<dyn Send + Sync + FnMut(Message)>>> = OnceLock::new();
-pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
+pub static LOG_FILE: LazyLock<PathBuf> = LazyLock::new(|| utils::DATA_DIR.join("latest.log"));
 
 pub fn register_message_sender(sender: impl FnMut(Message) + Send + Sync + 'static) {
     SENDER
@@ -35,11 +40,10 @@ pub fn init() {
         .filter_module("iced_winit", LevelFilter::Warn)
         .parse_default_env()
         .build();
-    let file = std::env::current_dir().unwrap().join("latest.log");
     let file = OpenOptions::new()
         .append(true)
         .create(true)
-        .open(file)
+        .open(&*LOG_FILE)
         .unwrap();
     let file_logger = env_logger::Builder::new()
         .filter_level(LevelFilter::Debug)

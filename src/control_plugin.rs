@@ -1,11 +1,12 @@
 use iced::Task;
 
-use crate::{CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput};
+use crate::{CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput, utils};
 
 #[derive(Clone, Copy)]
 pub enum Action {
     Quit,
     Hide,
+    ShowLogs,
 }
 
 impl Action {
@@ -13,6 +14,7 @@ impl Action {
         match self {
             Action::Quit => "quit",
             Action::Hide => "hide",
+            Action::ShowLogs => "logs",
         }
     }
     pub const fn get_description(self) -> &'static str {
@@ -21,11 +23,12 @@ impl Action {
                 "Exit the runner (This will exit it entirely, not just hide the window)."
             }
             Action::Hide => "Hides the window",
+            Action::ShowLogs => "Open the latest application logs",
         }
     }
 }
 
-static ACTIONS: &[Action] = &[Action::Quit, Action::Hide];
+static ACTIONS: &[Action] = &[Action::Quit, Action::Hide, Action::ShowLogs];
 
 #[derive(Default)]
 pub struct ControlPlugin;
@@ -54,7 +57,11 @@ impl Plugin for ControlPlugin {
     fn handle_pre(&self, thing: CustomData, _: &str) -> iced::Task<Message> {
         match thing.into::<Action>() {
             Action::Quit => Task::done(Message::Exit),
-            Action::Hide => Task::done(Message::HideMainWindow),
+            Action::Hide => Task::none(),
+            Action::ShowLogs => {
+                utils::open_file(&**crate::logging::LOG_FILE);
+                Task::none()
+            }
         }
     }
 

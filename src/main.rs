@@ -1,10 +1,17 @@
-use std::{collections::BTreeMap, fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt::Debug,
+    path::Path,
+    sync::{Arc, LazyLock},
+    time::{Duration, SystemTime},
+};
 
-use config::BlurAction;
+use config::{BlurAction, Config, FileWatcherEntry, Files};
 use control_plugin::ControlPlugin;
 use convert_plugin::ConvertPlugin;
 use dice_plugin::DicePlugin;
-use file_plugin::{FilePlugin, IndexerMessage};
+use file_index::{FileIndexMessage, FileIndexResponse};
+use file_plugin::FilePlugin;
 use filter_service::{CollectorController, CollectorMessage};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
@@ -13,7 +20,7 @@ use global_hotkey::{
 use iced::{
     Color, Element, Length, Point, Size, Subscription, Task, Theme,
     alignment::{Horizontal, Vertical},
-    futures::{SinkExt, StreamExt, channel::mpsc::Sender, future::BoxFuture},
+    futures::{SinkExt, future::BoxFuture},
     keyboard::{Key, Modifiers, key::Named},
     mouse::ScrollDelta,
     stream::channel,
@@ -44,6 +51,22 @@ mod special_windows;
 mod theme_plugin;
 mod utils;
 pub use filter_service::ResultBuilder;
+
+pub static CONFIG: LazyLock<Arc<Config>> = LazyLock::new(|| {
+    Config {
+        files: Files {
+            entries: vec![FileWatcherEntry {
+                path: Path::new("/home/fishi").into(),
+                watch: true,
+                reindex_every: None,
+                filter: Default::default(),
+            }],
+            reindex_at_startup: false,
+        },
+        on_blur: BlurAction::Refocus,
+    }
+    .into()
+});
 
 pub trait CustomDataCompatible: std::any::Any + Send + Sync + 'static {
     fn clone_custom_data(&self) -> Box<dyn CustomDataCompatible>;
@@ -160,8 +183,6 @@ pub enum Message {
     None,
     InputPress,
     Exit,
-    Reindex,
-    FileIndexMessage(IndexerMessage),
     CollectorMessage(CollectorMessage),
     ResultsUpdated,
     KeyPressed(Key, Modifiers),
@@ -169,6 +190,7 @@ pub enum Message {
     HideActions,
     Blurred,
     OpenSpecial(SpecialWindowState),
+    IndexerMessage(FileIndexResponse),
 }
 
 #[derive(Clone)]
@@ -221,7 +243,7 @@ pub struct State {
     plugins: Arc<Vec<Box<dyn AnyPlugin>>>,
     plugin_builder: Vec<Box<dyn FnMut() -> Box<dyn AnyPlugin>>>,
     theme: Theme,
-    index_sender: Option<Sender<()>>,
+    index_sender: Option<smol::channel::Sender<FileIndexMessage>>,
     collector_controller: Option<CollectorController>,
     showing_actions: bool,
     selected_action: usize,
@@ -306,10 +328,6 @@ impl State {
         let search_field = SearchInput::new(&self.search_query, self.text_input.clone());
         let mut col = column![stack([
             search_field.into(),
-            // mouse_area(horizontal_space().width(Length::Fill).height(Length::Fill))
-            //     .on_press(Message::InputPress)
-            //     .interaction(Interaction::Idle)
-            //     .into(),
             text(format!("{} / {}  ", self.selected + 1, self.results.len()))
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -611,8 +629,7 @@ impl State {
             | Message::HandleAction { .. }
             | Message::None
             | Message::Exit
-            | Message::Reindex
-            | Message::FileIndexMessage(_)
+            | Message::IndexerMessage(_)
             | Message::CollectorMessage(CollectorMessage::Ready(_)) => unreachable!(),
         }
         if self.selected < self.offset {
@@ -718,26 +735,19 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::Exit => iced::exit(),
         Message::None => Task::none(),
-        Message::Reindex => match &mut state.index_sender {
-            None => Task::none(),
-            Some(v) => match v.try_send(()) {
-                Ok(_) => Task::none(),
-                Err(e) if e.is_full() => Task::none(),
-                Err(e) => {
-                    log::error!("Failed to request a file reindex: {e:?}");
-                    state.index_sender = None;
-                    Task::none()
-                }
-            },
-        },
-        Message::FileIndexMessage(msg) => match msg {
-            IndexerMessage::Ready(sender) => {
-                state.index_sender = Some(sender);
-                Task::done(Message::Reindex)
-            }
-            IndexerMessage::IndexingFinished if state.window.is_none() => Task::none(),
-            IndexerMessage::IndexingFinished => Task::done(Message::ResultsUpdated),
-        },
+        Message::IndexerMessage(FileIndexResponse::IndexFinished) if state.window.is_none() => {
+            Task::none()
+        }
+        Message::IndexerMessage(FileIndexResponse::IndexFinished) => {
+            Task::done(Message::ResultsUpdated)
+        }
+        Message::IndexerMessage(FileIndexResponse::Starting(sender)) => {
+            sender
+                .force_send(FileIndexMessage::SetConfig(CONFIG.clone()))
+                .expect("this should never fail :3");
+            state.index_sender = Some(sender);
+            Task::none()
+        }
         Message::CollectorMessage(CollectorMessage::Ready(controller)) => {
             state.collector_controller = Some(controller);
             Task::none()
@@ -774,6 +784,7 @@ static HOTKEY: HotKey = make_hotkey(HKModifiers::ALT, Code::KeyP);
 
 fn main() -> iced::Result {
     logging::init();
+    log::info!("--- New Run ---");
     let manager = GlobalHotKeyManager::new().expect("failed to start the hotkey manager");
     manager
         .register(HOTKEY)
@@ -795,10 +806,7 @@ fn main() -> iced::Result {
                         Message::None
                     }
                 }),
-                // re-index every 10 minutes
-                Subscription::run(|| smol::Timer::interval(Duration::from_secs(10 * 60)).boxed())
-                    .map(|_| Message::Reindex),
-                // Subscription::run(file_plugin::start_indexer).map(Message::FileIndexMessage),
+                Subscription::run(file_index::file_index_service).map(Message::IndexerMessage),
                 Subscription::run(filter_service::collector).map(Message::CollectorMessage),
                 Subscription::run(|| {
                     channel(100, |mut sender| async move {

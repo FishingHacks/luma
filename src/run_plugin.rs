@@ -51,7 +51,7 @@ impl Plugin for RunPlugin {
     fn init(&mut self) {
         let mut file_entries = Vec::new();
         let mut programs = HashSet::new();
-        for dir in utils::DATA_DIRS.iter() {
+        for dir in utils::APPLICATION_DIRS.iter() {
             let Ok(dirent) = dir.read_dir() else { continue };
             for entry in dirent {
                 let Ok(entry) = entry else { continue };

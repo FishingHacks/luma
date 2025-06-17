@@ -11,14 +11,16 @@ use freedesktop_file_parser::EntryType;
 
 use crate::cache::Cache;
 
-pub static DATA_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
+pub static CRATE_NAME: &str = env!("CARGO_PKG_NAME");
+pub static HOME_DIR: LazyLock<PathBuf> =
+    LazyLock::new(|| std::env::home_dir().expect("no homedir was found!"));
+pub static APPLICATION_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
     let mut dirs = vec![PathBuf::from("/usr/share/applications")];
-    if let Some(mut application_path) = std::env::home_dir() {
-        application_path.push(".local");
-        application_path.push("share");
-        application_path.push("applications");
-        dirs.push(application_path);
-    }
+    let mut application_path = HOME_DIR.clone();
+    application_path.push(".local");
+    application_path.push("share");
+    application_path.push("applications");
+    dirs.push(application_path);
     if let Some(data_dir_var) = std::env::var_os("XDG_DATA_DIRS") {
         std::env::split_paths(&data_dir_var)
             .filter_map(|v| v.canonicalize().ok())
@@ -85,7 +87,7 @@ pub fn run(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item = impl AsRef<OsS
 }
 
 pub fn locate_desktop_file(name: impl AsRef<Path> + Copy) -> Option<PathBuf> {
-    DATA_DIRS
+    APPLICATION_DIRS
         .iter()
         .map(|path| path.join(name))
         .find(|v| v.exists() && v.is_file())
@@ -113,10 +115,10 @@ pub fn run_in_terminal(cmd: Command) {
     }
 }
 
-pub fn open_file(file: impl Into<PathBuf>) {
+pub fn open_file(file: impl Into<Arc<Path>>) {
     let file = file.into();
     let mut cmd = Command::new("xdg-mime");
-    cmd.arg("query").arg("filetype").arg(&file);
+    cmd.arg("query").arg("filetype").arg(&*file);
     std::thread::spawn(move || {
         let output = match cmd.output() {
             Ok(output) if output.status.success() => output.stdout,
@@ -238,3 +240,30 @@ static DESKTOP_FILE_INFO_CACHE: LazyLock<RwLock<DesktopFileCache>> = LazyLock::n
         Duration::from_secs(5 * 60),
     ))
 });
+
+pub static CONFIG_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    let mut buf = if let Some(value) = std::env::var_os("XDG_CONFIG_HOME") {
+        PathBuf::from(value)
+    } else {
+        let mut buf = HOME_DIR.clone();
+        buf.push(".config");
+        buf
+    };
+    buf.push(CRATE_NAME);
+    buf
+});
+
+pub static DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    let mut buf = if let Some(value) = std::env::var_os("XDG_DATA_HOME") {
+        PathBuf::from(value)
+    } else {
+        let mut buf = HOME_DIR.clone();
+        buf.push(".local");
+        buf.push("share");
+        buf
+    };
+    buf.push(CRATE_NAME);
+    buf
+});
+
+pub static CONFIG_FILE: LazyLock<PathBuf> = LazyLock::new(|| CONFIG_DIR.join("config.toml"));
