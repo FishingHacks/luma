@@ -67,6 +67,13 @@ Development Dependencies:
 
 These are some rough estimates i made while running the application:
 
-Filtering and displaying around 30 lines in a lua plugin: 800µs - 1ms
-Indexing /home (14000 files and directories found after filtering): 6s
-Searching through all indexed file (~14000): 54ms
+Measured in Debug mode:
+
+- Filtering and displaying around 30 lines in a lua plugin: 800µs - 1ms
+- Indexing /home (14000 files and directories found after filtering): 6s
+- Searching through all indexed file (~14000): 54ms
+
+
+Measured in Release mode:
+
+- Indexing /home (~24000 files and directories after filtering): 1.119s

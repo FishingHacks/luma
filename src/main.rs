@@ -538,7 +538,7 @@ impl State {
     }
 
     fn run(&mut self, index: usize, selected_action: usize) -> iced::Task<Message> {
-        if self.results.len() <= self.selected_action {
+        if self.results.len() <= self.selected {
             return Task::none();
         }
         let entry = &self.results[index];
