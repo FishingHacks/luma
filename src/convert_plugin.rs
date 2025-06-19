@@ -1,8 +1,6 @@
-use std::iter;
-
 use iced::{Task, clipboard};
 
-use crate::{Action, CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput};
+use crate::{Action, CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput};
 
 // Currency: See https://www.exchangerate-api.com/docs/free
 
@@ -22,7 +20,7 @@ impl Plugin for ConvertPlugin {
         "convert"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput<'_>, builder: &ResultBuilder) {
+    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
         let mut words = input.input().split(" ");
         // <value> <unit> to <unit>
         let Some(value) = words.next() else { return };
@@ -42,13 +40,10 @@ impl Plugin for ConvertPlugin {
                 && conversion.1.eq_ignore_ascii_case(unit_to)
             {
                 let result = amount * conversion.2;
+                let name = format!("{} {}", result, conversion.1);
+                let subtitle = format!("Converted from {} {}", amount, conversion.0);
                 return builder
-                    .commit(iter::once(Entry {
-                        name: format!("{} {}", result, conversion.1).into(),
-                        subtitle: format!("Converted from {} {}", amount, conversion.0).into(),
-                        plugin: self.prefix(),
-                        data: CustomData::new((result, conversion.1)),
-                    }))
+                    .add(Entry::new(name, subtitle, CustomData::new((result, conversion.1))).pin())
                     .await;
             }
         }

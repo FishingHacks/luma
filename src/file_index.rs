@@ -231,6 +231,7 @@ async fn main_loop(
 
     let mut writer = index.write().await;
     let mut watcher = writer.watcher.write_arc().await;
+    log::debug!("got watch events");
     while !event_receiver.is_empty() || prev_event.is_some() {
         let ev = match prev_event.take() {
             Some(e) => e,
@@ -244,7 +245,6 @@ async fn main_loop(
         if ev.need_rescan() {
             log::info!("Note: deal with need_rescan");
         }
-        log::debug!("got watch events {ev:?}");
         match ev.kind {
             EventKind::Create(kind @ (CreateKind::File | CreateKind::Folder)) => {
                 for path in &ev.paths {
@@ -501,8 +501,10 @@ impl FileIndexData {
         let mut did_err = false;
         self.directories.retain(|dir| {
             if let Err(e) = watcher.watch(dir, RecursiveMode::NonRecursive) {
-                if matches!(e.kind, ErrorKind::PathNotFound | ErrorKind::WatchNotFound) {
-                    return false;
+                match e.kind {
+                    ErrorKind::PathNotFound | ErrorKind::WatchNotFound => return false,
+                    ErrorKind::Io(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+                    _ => {}
                 }
                 if did_err {
                     return true;
@@ -565,7 +567,10 @@ impl FileIndexer {
                         log::error!("While watching {}: {e}", root.display())
                     }
                     ErrorKind::Io(e) => log::error!("While watching {}: {e}", root.display()),
-                    ErrorKind::PathNotFound | ErrorKind::WatchNotFound => unreachable!(),
+                    ErrorKind::PathNotFound => {
+                        log::error!("While watching {}: path not found", root.display())
+                    }
+                    ErrorKind::WatchNotFound => unreachable!(),
                     ErrorKind::InvalidConfig(_) => log::error!(
                         "An invalid config was passed onto the watcher. This should never happen."
                     ),

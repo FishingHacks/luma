@@ -35,8 +35,8 @@ impl SpecialWindowState {
     pub fn size(&self) -> Option<Size> {
         match self {
             SpecialWindowState::ErrorPopup(_) | SpecialWindowState::WarnPopup(_) => Some(Size {
-                width: 250.0,
-                height: 125.0,
+                width: 400.0,
+                height: 150.0,
             }),
         }
     }

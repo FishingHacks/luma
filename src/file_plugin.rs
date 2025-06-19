@@ -1,11 +1,14 @@
 // File plugin to search and index the entire drive (except a few directories)
 
-use std::{ffi::OsStr, path::Path, sync::Arc};
+use std::{ffi::OsStr, path::Path, process::Command, sync::Arc};
 
-use iced::Task;
+use iced::{
+    Task,
+    keyboard::{Key, Modifiers, key::Named},
+};
 
 use crate::{
-    Action, CustomData, Entry, Message, Plugin, ResultBuilder, file_index::FILE_INDEX,
+    Action, CustomData, Entry, Message, Plugin, ResultBuilderRef, file_index::FILE_INDEX,
     matcher::MatcherInput, plugin::StringLike, utils,
 };
 
@@ -16,9 +19,15 @@ fn iter<'a>(
     input: &MatcherInput,
     iter: impl Iterator<Item = &'a Arc<Path>>,
 ) -> impl Iterator<Item = Entry> {
-    iter.filter(|path| path_matches(input, path))
-        .map(|v| (v.clone(), v.file_name().map(|v| v.len()).unwrap_or(0)))
-        .map(|(v, filename_len)| {
+    iter.filter_map(|path| path_matches(input, path).map(|v| (path, v)))
+        .map(|(v, perfect_match)| {
+            (
+                v.clone(),
+                v.file_name().map(|v| v.len()).unwrap_or(0),
+                perfect_match,
+            )
+        })
+        .map(|(v, filename_len, perfect_match)| {
             let mut name = StringLike::from(v.clone());
             name.substr((name.len() - filename_len) as u16..);
             let mut subtitle = StringLike::from(v.clone());
@@ -26,8 +35,8 @@ fn iter<'a>(
             Entry {
                 name,
                 subtitle,
-                plugin: FilePlugin.prefix(),
                 data: CustomData::new(v),
+                perfect_match,
             }
         })
 }
@@ -38,7 +47,7 @@ impl Plugin for FilePlugin {
         "file"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput<'_>, builder: &ResultBuilder) {
+    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
         let Some(index) = FILE_INDEX.get() else {
             return;
         };
@@ -56,20 +65,34 @@ impl Plugin for FilePlugin {
 
     fn init(&mut self) {}
 
-    fn handle_pre(&self, thing: CustomData, _: &str) -> Task<Message> {
+    fn handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
         let path = thing.into::<Arc<Path>>();
-        utils::open_file(path);
+        if action == "open" {
+            utils::open_file(path);
+        } else if let Some(terminal) = &*utils::TERMINAL {
+            let mut cmd = Command::new(terminal);
+            cmd.current_dir(path);
+            utils::run_cmd(cmd);
+        }
         Task::none()
     }
 
     fn actions(&self) -> &'static [Action] {
-        const { &[Action::default("Open", "")] }
+        const {
+            &[
+                Action::default("Open", "open"),
+                Action::new(
+                    "Open in terminal",
+                    "terminal",
+                    (Modifiers::CTRL, Key::Named(Named::Enter)),
+                ),
+            ]
+        }
     }
 }
 
-fn path_matches(input: &MatcherInput, path: &Path) -> bool {
+fn path_matches(input: &MatcherInput, path: &Path) -> Option<bool> {
     path.file_name()
         .and_then(OsStr::to_str)
-        .map(|v| input.matches(v))
-        .unwrap_or(false)
+        .and_then(|v| input.matches_perfect(v))
 }

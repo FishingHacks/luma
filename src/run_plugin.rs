@@ -8,7 +8,7 @@ use iced::{
 };
 
 use crate::{
-    Action, CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput, utils,
+    Action, CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput, utils,
 };
 
 struct FileEntry {
@@ -30,7 +30,7 @@ impl Plugin for RunPlugin {
         "run"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput<'_>, builder: &ResultBuilder) {
+    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
         let iter = self
             .files
             .iter()
@@ -39,12 +39,7 @@ impl Plugin for RunPlugin {
                 input.matches(&v.name)
                     || (input.matches(&v.description) && !v.description.is_empty())
             })
-            .map(|(i, v)| Entry {
-                name: v.name.clone().into(),
-                subtitle: v.description.clone().into(),
-                plugin: self.prefix(),
-                data: CustomData::new(i),
-            });
+            .map(|(i, v)| Entry::new(v.name.clone(), v.description.clone(), CustomData::new(i)));
         builder.commit(iter).await;
     }
 

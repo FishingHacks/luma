@@ -124,7 +124,13 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
                         {
                             break 'blk false;
                         }
-                        Key::Named(Named::Enter) => shell.publish(Message::Submit),
+                        Key::Named(Named::Enter)
+                            // only no modifiers or alt+enter count as submit (alt because of the
+                            // actions list that shows up when holding down alt.)
+                            if (*modifiers | Modifiers::ALT) == Modifiers::ALT =>
+                        {
+                            shell.publish(Message::Submit)
+                        }
                         Key::Named(Named::PageUp) => shell.publish(Message::Go10Up),
                         Key::Named(Named::PageDown) => shell.publish(Message::Go10Down),
                         Key::Named(Named::ArrowUp) => shell.publish(Message::GoUp),

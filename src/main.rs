@@ -1,9 +1,10 @@
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     fmt::Debug,
     path::Path,
     sync::{Arc, LazyLock},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use config::{BlurAction, Config, FileWatcherEntry, Files};
@@ -12,7 +13,7 @@ use convert_plugin::ConvertPlugin;
 use dice_plugin::DicePlugin;
 use file_index::{FileIndexMessage, FileIndexResponse};
 use file_plugin::FilePlugin;
-use filter_service::{CollectorController, CollectorMessage};
+use filter_service::{CollectorController, CollectorMessage, ResultBuilderRef};
 use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
     hotkey::{Code, HotKey, Modifiers as HKModifiers},
@@ -42,7 +43,9 @@ mod dice_plugin;
 mod file_index;
 mod file_plugin;
 mod filter_service;
+mod keybind;
 mod logging;
+mod lua;
 mod matcher;
 mod plugin;
 mod run_plugin;
@@ -83,57 +86,94 @@ pub trait AsCustomData {
 }
 
 pub trait Plugin: Send + Sync {
-    fn actions(&self) -> &'static [Action] {
+    fn actions(&self) -> &[Action] {
         const { &[Action::default("Default Action", "")] }
     }
-    fn prefix(&self) -> &'static str;
+    fn prefix(&self) -> &str;
     fn get_for_values(
         &self,
         input: &MatcherInput,
-        builder: &ResultBuilder,
+        builder: ResultBuilderRef<'_>,
     ) -> impl std::future::Future<Output = ()> + std::marker::Send;
     fn init(&mut self);
     #[allow(unused_variables)]
-    fn handle_pre(&self, thing: CustomData, action: &'static str) -> Task<Message> {
+    fn handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
         Task::none()
     }
     #[allow(unused_variables)]
-    fn handle_post(&self, thing: CustomData, action: &'static str) -> Task<Message> {
+    fn handle_post(&self, thing: CustomData, action: &str) -> Task<Message> {
         Task::none()
+    }
+}
+
+pub struct Entry {
+    name: StringLike,
+    subtitle: StringLike,
+    perfect_match: bool,
+    data: CustomData,
+}
+impl Entry {
+    pub fn new(
+        name: impl Into<StringLike>,
+        subtitle: impl Into<StringLike>,
+        data: CustomData,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            subtitle: subtitle.into(),
+            data,
+            perfect_match: false,
+        }
+    }
+
+    /// this function pins this entry to the top of the list.
+    ///
+    /// Effectively this is the same as [`Entry::perfect`] called with true
+    pub fn pin(mut self) -> Self {
+        // this effectively pins it to the top
+        self.perfect_match = true;
+        self
+    }
+    pub fn perfect(mut self, perfect: bool) -> Self {
+        self.perfect_match = perfect;
+        self
     }
 }
 
 pub trait AnyPlugin: Send + Sync {
     fn as_any_ref(&self) -> &dyn std::any::Any;
-    fn any_actions(&self) -> &'static [Action];
-    fn any_prefix(&self) -> &'static str;
-    fn any_get_for_values<'future, 'a: 'future, 'b: 'future, 'c: 'future, 'd: 'future>(
-        &'a self,
-        input: &'b MatcherInput<'c>,
-        builder: &'d ResultBuilder,
+    fn any_actions(&self) -> &[Action];
+    fn any_prefix(&self) -> &str;
+    fn any_get_for_values<'future>(
+        &'future self,
+        input: &'future MatcherInput,
+        builder: &'future ResultBuilder,
+        plugin_id: usize,
     ) -> BoxFuture<'future, ()>;
     fn any_init(&mut self);
-    fn any_handle_pre(&self, thing: CustomData, action: &'static str) -> Task<Message>;
-    fn any_handle_post(&self, thing: CustomData, action: &'static str) -> Task<Message>;
+    fn any_handle_pre(&self, thing: CustomData, action: &str) -> Task<Message>;
+    fn any_handle_post(&self, thing: CustomData, action: &str) -> Task<Message>;
 }
 impl<T: Plugin + 'static> AnyPlugin for T {
     fn as_any_ref(&self) -> &dyn std::any::Any {
         self
     }
 
-    fn any_actions(&self) -> &'static [Action] {
+    fn any_actions(&self) -> &[Action] {
         self.actions()
     }
 
-    fn any_prefix(&self) -> &'static str {
+    fn any_prefix(&self) -> &str {
         self.prefix()
     }
 
-    fn any_get_for_values<'future, 'a: 'future, 'b: 'future, 'c: 'future, 'd: 'future>(
-        &'a self,
-        input: &'b MatcherInput<'c>,
-        builder: &'d ResultBuilder,
-    ) -> BoxFuture<'future, ()> {
+    fn any_get_for_values<'fut>(
+        &'fut self,
+        input: &'fut MatcherInput,
+        builder: &'fut ResultBuilder,
+        plugin_id: usize,
+    ) -> BoxFuture<'fut, ()> {
+        let builder = ResultBuilderRef::create(plugin_id, builder);
         Box::pin(self.get_for_values(input, builder))
     }
 
@@ -141,10 +181,10 @@ impl<T: Plugin + 'static> AnyPlugin for T {
         self.init();
     }
 
-    fn any_handle_pre(&self, thing: CustomData, action: &'static str) -> Task<Message> {
+    fn any_handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
         self.handle_pre(thing, action)
     }
-    fn any_handle_post(&self, thing: CustomData, action: &'static str) -> Task<Message> {
+    fn any_handle_post(&self, thing: CustomData, action: &str) -> Task<Message> {
         self.handle_post(thing, action)
     }
 }
@@ -176,9 +216,9 @@ pub enum Message {
     Show,
     ChangeTheme(Theme),
     HandleAction {
-        plugin: &'static str,
+        plugin: usize,
         data: CustomData,
-        action: &'static str,
+        action: String,
     },
     None,
     InputPress,
@@ -209,18 +249,20 @@ impl CustomData {
 }
 
 #[derive(Debug, Clone)]
-pub struct Entry {
+pub struct GenericEntry {
     name: StringLike,
     subtitle: StringLike,
-    plugin: &'static str,
+    /// the plugin index into the state
+    plugin: usize,
     data: CustomData,
+    perfect_match: bool,
 }
 
-impl Entry {
+impl GenericEntry {
     pub fn new(
         name: impl Into<StringLike>,
         subtitle: impl Into<StringLike>,
-        plugin: &'static str,
+        plugin: usize,
         data: CustomData,
     ) -> Self {
         Self {
@@ -228,13 +270,19 @@ impl Entry {
             subtitle: subtitle.into(),
             plugin,
             data,
+            perfect_match: false,
         }
+    }
+
+    pub fn perfect(mut self, perfect: bool) -> Self {
+        self.perfect_match = perfect;
+        self
     }
 }
 
 pub struct State {
     search_query: String,
-    results: Vec<Entry>,
+    results: Vec<GenericEntry>,
     selected: usize,
     offset: usize,
     num_entries: usize,
@@ -248,7 +296,6 @@ pub struct State {
     showing_actions: bool,
     selected_action: usize,
     on_blur: BlurAction,
-    actions: &'static [Action],
     special_windows: BTreeMap<window::Id, SpecialWindowState>,
 }
 
@@ -258,18 +305,18 @@ const ALLOWED_ACTION_MODIFIERS: Modifiers = Modifiers::COMMAND
     .union(Modifiers::LOGO);
 
 pub struct Action {
-    name: &'static str,
+    name: Cow<'static, str>,
     shortcut: (Modifiers, Key),
-    id: &'static str,
+    id: Cow<'static, str>,
     closes: bool,
 }
 
 impl Action {
     pub const fn new(name: &'static str, id: &'static str, shortcut: (Modifiers, Key)) -> Self {
         Self {
-            name,
+            name: Cow::Borrowed(name),
             shortcut,
-            id,
+            id: Cow::Borrowed(id),
             closes: true,
         }
     }
@@ -291,6 +338,29 @@ impl Action {
     pub const fn keep_open(mut self) -> Self {
         self.closes = false;
         self
+    }
+
+    pub const fn new_owned(name: String, id: String, shortcut: (Modifiers, Key)) -> Self {
+        Self {
+            name: Cow::Owned(name),
+            shortcut,
+            id: Cow::Owned(id),
+            closes: true,
+        }
+    }
+
+    pub const fn without_shortcut_owned(name: String, id: String) -> Self {
+        Self::new_owned(name, id, (Modifiers::empty(), Key::Unidentified))
+    }
+
+    /// Constructs the suggest action (tab)
+    pub const fn suggest_owned(name: String, id: String) -> Self {
+        Self::new_owned(name, id, (Modifiers::empty(), Key::Named(Named::Tab)))
+    }
+
+    /// Constructs the default action. This should always be the first entry.
+    pub const fn default_owned(name: String, id: String) -> Self {
+        Self::new_owned(name, id, (Modifiers::empty(), Key::Named(Named::Enter)))
     }
 }
 
@@ -379,11 +449,11 @@ impl State {
             );
         }
         if self.showing_actions {
-            for (i, action) in self.actions.iter().enumerate() {
+            for (i, action) in self.get_actions().iter().enumerate() {
                 let mut s = String::new();
                 action_format_key(&action.shortcut.1, action.shortcut.0, &mut s);
                 let description = row![
-                    text(action.name).size(16).style(text::default),
+                    text(&action.name).size(16).style(text::default),
                     text(s).color(Color::from_rgb8(0x60, 0x60, 0x60)),
                 ]
                 .spacing(10);
@@ -416,6 +486,17 @@ impl State {
             }
         })
     }
+    fn get_actions(&self) -> &[Action] {
+        if self.showing_actions {
+            self.results
+                .get(self.selected)
+                .and_then(|res| self.plugins.get(res.plugin))
+                .map(|v| v.any_actions())
+                .unwrap_or_default()
+        } else {
+            &[]
+        }
+    }
 
     fn update_matches(&mut self) {
         if self.search_query.is_empty() {
@@ -423,43 +504,44 @@ impl State {
             return;
         }
         if let Some(controller) = &mut self.collector_controller {
-            controller.start(self.plugins.clone(), self.search_query.to_lowercase());
+            controller.start(
+                self.plugins.clone(),
+                self.search_query.trim().to_lowercase(),
+            );
         } else {
             log::error!("Failed to query: no collector controller present");
         }
     }
 
-    fn run(&mut self, index: usize, action: Option<&'static str>) -> iced::Task<Message> {
-        if self.results.is_empty() {
+    fn run(&mut self, index: usize, selected_action: usize) -> iced::Task<Message> {
+        if self.results.len() <= self.selected_action {
             return Task::none();
         }
         let entry = &self.results[index];
-        for plugin in self.plugins.iter() {
-            if plugin.any_prefix() == entry.plugin {
-                let action = action.unwrap_or(plugin.any_actions()[0].id);
-                let Some(action) = plugin.any_actions().iter().find(|v| v.id == action) else {
-                    return Task::none();
-                };
-                if action.closes {
-                    let entry = self.results.remove(index);
-                    return Task::batch([
-                        plugin.any_handle_pre(entry.data.clone(), action.id),
-                        Task::done(Message::HideMainWindow),
-                        Task::done(Message::HandleAction {
-                            plugin: entry.plugin,
-                            data: entry.data,
-                            action: action.id,
-                        }),
-                    ]);
-                } else {
-                    return Task::batch([
-                        plugin.any_handle_pre(entry.data.clone(), action.id),
-                        plugin.any_handle_post(entry.data.clone(), action.id),
-                    ]);
-                }
-            }
+        if entry.plugin >= self.plugins.len() {
+            return Task::none();
         }
-        Task::none()
+        let plugin = &self.plugins[entry.plugin];
+        let Some(action) = plugin.any_actions().get(selected_action) else {
+            return Task::none();
+        };
+        if action.closes {
+            let entry = self.results.remove(index);
+            Task::batch([
+                plugin.any_handle_pre(entry.data.clone(), &action.id),
+                Task::done(Message::HideMainWindow),
+                Task::done(Message::HandleAction {
+                    plugin: entry.plugin,
+                    data: entry.data,
+                    action: action.id.to_string(),
+                }),
+            ])
+        } else {
+            Task::batch([
+                plugin.any_handle_pre(entry.data.clone(), &action.id),
+                plugin.any_handle_post(entry.data.clone(), &action.id),
+            ])
+        }
     }
 
     fn handle_go_up(&mut self, amount: usize) {
@@ -471,8 +553,9 @@ impl State {
     }
 
     fn handle_go_down(&mut self, amount: usize) {
-        if self.showing_actions {
-            self.selected_action = (self.selected_action + amount).min(self.actions.len() - 1);
+        let actions = self.get_actions();
+        if self.showing_actions && !actions.is_empty() {
+            self.selected_action = (self.selected_action + amount).min(actions.len() - 1);
         } else {
             self.selected = (self.selected + amount).min(self.results.len() - 1);
         }
@@ -481,7 +564,6 @@ impl State {
     fn hide_actions(&mut self) {
         self.showing_actions = false;
         self.selected_action = 0;
-        self.actions = &[];
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -521,16 +603,15 @@ impl State {
                 if let Some(action) = self
                     .results
                     .get(self.selected)
-                    .and_then(|v| self.get_plugin(v.plugin))
+                    .and_then(|v| self.plugins.get(v.plugin))
                     .and_then(|plugin| {
                         plugin
                             .any_actions()
                             .iter()
-                            .find(|v| v.shortcut.0 == modifiers && v.shortcut.1 == key)
+                            .position(|v| v.shortcut.0 == modifiers && v.shortcut.1 == key)
                     })
-                    .map(|v| v.id)
                 {
-                    return self.run(self.selected, Some(action));
+                    return self.run(self.selected, action);
                 }
             }
             Message::ResultsUpdated => self.update_matches(),
@@ -541,8 +622,10 @@ impl State {
             Message::Submit => {
                 return self.run(
                     self.selected,
-                    self.showing_actions
-                        .then(|| self.actions[self.selected_action].id),
+                    match self.showing_actions {
+                        true => self.selected_action,
+                        false => 0,
+                    },
                 );
             }
             Message::Click(index) => {
@@ -556,7 +639,7 @@ impl State {
                 if self.selected >= self.offset + self.num_entries {
                     self.offset = self.selected + 1 - self.num_entries;
                 }
-                return self.run(index, None);
+                return self.run(index, 0);
             }
             Message::HideMainWindow => {
                 self.search_query.clear();
@@ -592,14 +675,13 @@ impl State {
                 if self.results.is_empty() {
                     return Task::none();
                 }
-                let Some(plugin) = self.get_plugin(self.results[self.selected].plugin) else {
+                let Some(plugin) = self.plugins.get(self.results[self.selected].plugin) else {
                     return Task::none();
                 };
                 let actions = plugin.any_actions();
                 if !self.results.is_empty() {
                     self.showing_actions = true;
                     self.selected_action = 0;
-                    self.actions = actions;
                     let new_height = (self.results.len().min(self.num_entries) * ENTRY_SIZE
                         + SEARCH_SIZE
                         + actions.len() * ACTION_SIZE) as f32;
@@ -654,6 +736,10 @@ impl State {
     }
 
     pub fn init_plugins(&mut self) {
+        if let Some(controller) = &mut self.collector_controller {
+            controller.stop();
+        }
+        self.results.clear();
         self.plugins = Arc::new(
             self.plugin_builder
                 .iter_mut()
@@ -721,18 +807,14 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             window::close(window_id)
         }
         Message::HandleAction {
-            plugin: plugin_prefix,
+            plugin,
             data,
             action,
-        } => {
-            for plugin in state.plugins.iter() {
-                if plugin.any_prefix() == plugin_prefix {
-                    return plugin.any_handle_post(data, action);
-                }
-            }
-            log::warn!("Err: No plugin called '{plugin_prefix}' found!");
-            Task::none()
-        }
+        } => state
+            .plugins
+            .get(plugin)
+            .map(|plugin| plugin.any_handle_post(data, &action))
+            .unwrap_or_else(Task::none),
         Message::Exit => iced::exit(),
         Message::None => Task::none(),
         Message::IndexerMessage(FileIndexResponse::IndexFinished) if state.window.is_none() => {
@@ -835,15 +917,14 @@ fn main() -> iced::Result {
                 showing_actions: false,
                 selected_action: 0,
                 on_blur: BlurAction::Refocus,
-                actions: &[],
                 special_windows: BTreeMap::new(),
             };
             state.add_plugin::<ControlPlugin>();
             state.add_plugin::<ThemePlugin>();
-            state.add_plugin::<RunPlugin>();
             state.add_plugin::<ConvertPlugin>();
-            state.add_plugin::<FilePlugin>();
             state.add_plugin::<DicePlugin>();
+            state.add_plugin::<RunPlugin>();
+            state.add_plugin::<FilePlugin>();
             (state, text_input::focus(text_input_id))
         })?;
     drop(manager);

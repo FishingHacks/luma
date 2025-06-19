@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use iced::{Task, Theme};
 
 use crate::{
-    Action, CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput,
+    Action, CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput,
     plugin::StringLike,
 };
 
@@ -23,16 +23,11 @@ impl Plugin for ThemePlugin {
         "theme"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput<'_>, builder: &ResultBuilder) {
+    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
         let iter = THEMES
             .iter()
             .filter(|&v| input.matches(&v.0))
-            .map(|v| Entry {
-                name: v.0.clone().into(),
-                subtitle: StringLike::Empty,
-                plugin: self.prefix(),
-                data: CustomData::new(v.1.clone()),
-            });
+            .map(|v| Entry::new(v.0.clone(), StringLike::Empty, CustomData::new(v.1.clone())));
         builder.commit(iter).await;
     }
 

@@ -3,7 +3,7 @@ use rand::Rng;
 use std::fmt::Write;
 
 use crate::{
-    Action, CustomData, Entry, Plugin, ResultBuilder, matcher::MatcherInput, plugin::StringLike,
+    Action, CustomData, Entry, Plugin, ResultBuilderRef, matcher::MatcherInput, plugin::StringLike,
 };
 
 #[derive(Default)]
@@ -14,26 +14,25 @@ impl Plugin for DicePlugin {
         "roll"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput<'_>, builder: &ResultBuilder) {
+    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
         let words = input.words();
         if words.is_empty() {
             return;
         }
         let mut entries = Vec::with_capacity(words.len());
         let mut total = 0;
-        for entry in words.iter().copied().filter_map(roll) {
+        for entry in words.iter().map(|v| v as &str).filter_map(roll) {
             entries.push(entry.0);
             total += entry.1
         }
         if entries.len() > 1 {
             entries.insert(
                 0,
-                Entry {
-                    name: format!("Overall Total:  {}", total).into(),
-                    subtitle: StringLike::Empty,
-                    plugin: self.prefix(),
-                    data: CustomData::new(total),
-                },
+                Entry::new(
+                    format!("Overall Total:  {}", total),
+                    StringLike::Empty,
+                    CustomData::new(total),
+                ),
             );
         }
         builder.commit(entries.into_iter()).await;
@@ -72,13 +71,6 @@ fn roll(s: &str) -> Option<(Entry, usize)> {
         _ = write!(subtitle, "{}", res);
     }
 
-    Some((
-        Entry {
-            name: format!("Rolled {}d{} - Total: {}", dice, sides, result).into(),
-            subtitle: subtitle.into(),
-            plugin: DicePlugin.prefix(),
-            data: CustomData::new(result),
-        },
-        result,
-    ))
+    let name = format!("Rolled {}d{} - Total: {}", dice, sides, result);
+    Some((Entry::new(name, subtitle, CustomData::new(result)), result))
 }

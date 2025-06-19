@@ -1,6 +1,6 @@
 use iced::Task;
 
-use crate::{CustomData, Entry, Message, Plugin, ResultBuilder, matcher::MatcherInput, utils};
+use crate::{CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput, utils};
 
 #[derive(Clone, Copy)]
 pub enum Action {
@@ -35,19 +35,20 @@ pub struct ControlPlugin;
 
 impl Plugin for ControlPlugin {
     #[inline(always)]
-    fn prefix(&self) -> &'static str {
+    fn prefix(&self) -> &str {
         "control"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput<'_>, builder: &ResultBuilder) {
+    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
         let iter = ACTIONS
             .iter()
             .filter(|&action| input.matches(action.get_name()))
-            .map(|action| Entry {
-                name: action.get_name().into(),
-                subtitle: action.get_description().into(),
-                plugin: self.prefix(),
-                data: CustomData::new(*action),
+            .map(|action| {
+                Entry::new(
+                    action.get_name(),
+                    action.get_description(),
+                    CustomData::new(*action),
+                )
             });
         builder.commit(iter).await;
     }

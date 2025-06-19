@@ -1,4 +1,5 @@
 use std::{
+    cmp,
     pin::pin,
     sync::{
         Arc,
@@ -18,16 +19,51 @@ use iced::{
 };
 use smol::{future::FutureExt, lock::RwLock};
 
-use crate::{AnyPlugin, Entry, matcher::MatcherInput};
+use crate::{AnyPlugin, CustomData, Entry, GenericEntry, matcher::MatcherInput};
+
+#[derive(Clone, Copy)]
+pub struct ResultBuilderRef<'a> {
+    plugin_id: usize,
+    builder: &'a ResultBuilder,
+}
+
+impl<'a> ResultBuilderRef<'a> {
+    pub(crate) fn create(plugin_id: usize, builder: &'a ResultBuilder) -> Self {
+        Self { plugin_id, builder }
+    }
+
+    pub async fn add(&self, entry: Entry) {
+        self.builder
+            .commit(std::iter::once(GenericEntry {
+                name: entry.name,
+                subtitle: entry.subtitle,
+                plugin: self.plugin_id,
+                data: entry.data,
+                perfect_match: entry.perfect_match,
+            }))
+            .await
+    }
+    pub async fn commit(&self, iter: impl Iterator<Item = Entry>) {
+        self.builder
+            .commit(iter.map(|entry| GenericEntry {
+                name: entry.name,
+                subtitle: entry.subtitle,
+                plugin: self.plugin_id,
+                data: CustomData::new(entry.data),
+                perfect_match: entry.perfect_match,
+            }))
+            .await
+    }
+}
 
 #[derive(Default)]
 pub struct ResultBuilder {
-    results: RwLock<Vec<Entry>>,
+    results: RwLock<Vec<GenericEntry>>,
     should_stop: Arc<AtomicBool>,
 }
 
 impl ResultBuilder {
-    pub async fn commit(&self, iter: impl Iterator<Item = Entry>) {
+    pub async fn commit(&self, iter: impl Iterator<Item = GenericEntry>) {
         if self.should_stop.load(Ordering::Relaxed) {
             return;
         }
@@ -40,7 +76,7 @@ impl ResultBuilder {
         }
     }
 
-    pub fn to_inner(self) -> Vec<Entry> {
+    pub fn to_inner(self) -> Vec<GenericEntry> {
         self.results.into_inner()
     }
 
@@ -57,7 +93,7 @@ enum Action {
 #[derive(Debug, Clone)]
 pub enum CollectorMessage {
     Ready(CollectorController),
-    Finished(Vec<Entry>),
+    Finished(Vec<GenericEntry>),
 }
 
 #[derive(Debug, Clone)]
@@ -119,7 +155,9 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
         std::thread::spawn(move || {
             smol::future::block_on(async {
                 'main: loop {
-                    let (plugins, query, should_stop) = match StreamExt::next(&mut receiver).await {
+                    let (plugins, mut query, should_stop) = match StreamExt::next(&mut receiver)
+                        .await
+                    {
                         Some(Action::Stop) => continue,
                         Some(Action::Start(plugins, query, stop_bool)) => {
                             (plugins, query, stop_bool)
@@ -136,12 +174,12 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                         results: RwLock::default(),
                         should_stop,
                     };
-                    for plugin in plugins.iter() {
+                    for (id, plugin) in plugins.iter().enumerate() {
                         if query.starts_with(plugin.any_prefix()) {
-                            let input =
-                                MatcherInput::new(query[plugin.any_prefix().len()..].trim());
+                            query.drain(..plugin.any_prefix().len());
+                            let input = MatcherInput::new(query, true);
                             let future = Either(
-                                plugin.any_get_for_values(&input, &result_builder),
+                                plugin.any_get_for_values(&input, &result_builder, id),
                                 next_msg,
                             );
                             if future.await {
@@ -156,18 +194,29 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                         }
                     }
 
-                    let input = MatcherInput::new(query.trim());
+                    let input = MatcherInput::new(query, false);
                     let futures = Joinall(
                         plugins
                             .iter()
-                            .map(|v| v.any_get_for_values(&input, &result_builder))
+                            .enumerate()
+                            .map(|(id, plugin)| {
+                                plugin.any_get_for_values(&input, &result_builder, id)
+                            })
                             .collect(),
                         next_msg,
                     );
                     if futures.await {
-                        let res = output
-                            .send(CollectorMessage::Finished(result_builder.to_inner()))
-                            .await;
+                        let mut entries = result_builder.to_inner();
+                        entries.sort_by(|a, b| {
+                            if a.perfect_match == b.perfect_match {
+                                cmp::Ordering::Equal
+                            } else if a.perfect_match {
+                                cmp::Ordering::Less
+                            } else {
+                                cmp::Ordering::Greater
+                            }
+                        });
+                        let res = output.send(CollectorMessage::Finished(entries)).await;
                         if handle_send_result(res) {
                             return;
                         }
