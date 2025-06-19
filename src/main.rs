@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     collections::BTreeMap,
+    ffi::OsStr,
     fmt::Debug,
     path::Path,
     sync::{Arc, LazyLock},
@@ -29,6 +30,7 @@ use iced::{
     window::{self, Level, Position, Settings},
 };
 use matcher::MatcherInput;
+use mlua::Lua;
 use plugin::StringLike;
 use run_plugin::RunPlugin;
 use search_input::SearchInput;
@@ -90,6 +92,13 @@ pub trait Plugin: Send + Sync {
         const { &[Action::default("Default Action", "")] }
     }
     fn prefix(&self) -> &str;
+    fn get_for_values_arc(
+        &self,
+        input: Arc<MatcherInput>,
+        builder: ResultBuilderRef<'_>,
+    ) -> impl std::future::Future<Output = ()> + std::marker::Send {
+        async move { self.get_for_values(&input, builder).await }
+    }
     fn get_for_values(
         &self,
         input: &MatcherInput,
@@ -146,7 +155,7 @@ pub trait AnyPlugin: Send + Sync {
     fn any_prefix(&self) -> &str;
     fn any_get_for_values<'future>(
         &'future self,
-        input: &'future MatcherInput,
+        input: Arc<MatcherInput>,
         builder: &'future ResultBuilder,
         plugin_id: usize,
     ) -> BoxFuture<'future, ()>;
@@ -169,12 +178,12 @@ impl<T: Plugin + 'static> AnyPlugin for T {
 
     fn any_get_for_values<'fut>(
         &'fut self,
-        input: &'fut MatcherInput,
+        input: Arc<MatcherInput>,
         builder: &'fut ResultBuilder,
         plugin_id: usize,
     ) -> BoxFuture<'fut, ()> {
         let builder = ResultBuilderRef::create(plugin_id, builder);
-        Box::pin(self.get_for_values(input, builder))
+        Box::pin(self.get_for_values_arc(input, builder))
     }
 
     fn any_init(&mut self) {
@@ -297,6 +306,7 @@ pub struct State {
     selected_action: usize,
     on_blur: BlurAction,
     special_windows: BTreeMap<window::Id, SpecialWindowState>,
+    lua: Lua,
 }
 
 const ALLOWED_ACTION_MODIFIERS: Modifiers = Modifiers::COMMAND
@@ -416,10 +426,24 @@ impl State {
             let selected = index == self.selected;
             let entry = &self.results[entry_idx + self.offset];
             let subtitle: Element<'_, Message> = if entry.subtitle.is_empty() {
-                text(entry.plugin).size(16).into()
+                text(
+                    self.plugins
+                        .get(entry.plugin)
+                        .map(|v| v.any_prefix())
+                        .unwrap_or_default(),
+                )
+                .size(16)
+                .into()
             } else {
                 row![
-                    text(entry.plugin).size(16).style(text::default),
+                    text(
+                        self.plugins
+                            .get(entry.plugin)
+                            .map(|v| v.any_prefix())
+                            .unwrap_or_default()
+                    )
+                    .size(16)
+                    .style(text::default),
                     text(" • ").size(16),
                     text(&*entry.subtitle)
                         .size(16)
@@ -730,9 +754,38 @@ impl State {
             .map(|v| &**v)
     }
 
+    pub fn add_plugin_instance<T: Plugin + Clone + 'static>(&mut self, value: T) {
+        self.plugin_builder
+            .push(Box::new(move || Box::new(value.clone())));
+    }
     pub fn add_plugin<T: Plugin + Default + 'static>(&mut self) {
         self.plugin_builder
             .push(Box::new(|| Box::new(T::default())));
+    }
+    pub fn add_lua_plugins(&mut self) {
+        log::debug!("Loading lua plugins...");
+        let Ok(dirent) = std::fs::read_dir(&*lua::LUA_PLUGIN_DIR) else {
+            return;
+        };
+        for ent in dirent.filter_map(Result::ok) {
+            let path = ent.path();
+            let Some(stem) = path.file_stem().and_then(OsStr::to_str) else {
+                continue;
+            };
+            let Some(ext) = path.extension() else {
+                continue;
+            };
+            if ext != "lua" {
+                continue;
+            }
+            let stem = Arc::<str>::from(stem);
+            match lua::load_lua_plugin(&self.lua, path, stem.clone()) {
+                Ok(v) => self.add_plugin_instance(v),
+                Err(e) => {
+                    log::error!("Failed to load plugin {stem:?}: {e}");
+                }
+            }
+        }
     }
 
     pub fn init_plugins(&mut self) {
@@ -867,6 +920,13 @@ static HOTKEY: HotKey = make_hotkey(HKModifiers::ALT, Code::KeyP);
 fn main() -> iced::Result {
     logging::init();
     log::info!("--- New Run ---");
+    let lua = match lua::setup_runtime() {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("{e}");
+            panic!("failed to setup lua");
+        }
+    };
     let manager = GlobalHotKeyManager::new().expect("failed to start the hotkey manager");
     manager
         .register(HOTKEY)
@@ -918,12 +978,14 @@ fn main() -> iced::Result {
                 selected_action: 0,
                 on_blur: BlurAction::Refocus,
                 special_windows: BTreeMap::new(),
+                lua,
             };
             state.add_plugin::<ControlPlugin>();
             state.add_plugin::<ThemePlugin>();
             state.add_plugin::<ConvertPlugin>();
             state.add_plugin::<DicePlugin>();
             state.add_plugin::<RunPlugin>();
+            state.add_lua_plugins();
             state.add_plugin::<FilePlugin>();
             (state, text_input::focus(text_input_id))
         })?;

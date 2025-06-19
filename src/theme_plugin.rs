@@ -24,17 +24,20 @@ impl Plugin for ThemePlugin {
     }
 
     async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
-        let iter = THEMES
-            .iter()
-            .filter(|&v| input.matches(&v.0))
-            .map(|v| Entry::new(v.0.clone(), StringLike::Empty, CustomData::new(v.1.clone())));
+        let iter = THEMES.iter().filter(|&v| input.matches(&v.0)).map(|v| {
+            Entry::new(
+                v.0.clone(),
+                StringLike::Empty,
+                CustomData::new::<Theme>(v.1.clone()),
+            )
+        });
         builder.commit(iter).await;
     }
 
     fn init(&mut self) {}
 
     fn handle_pre(&self, thing: CustomData, _: &str) -> iced::Task<Message> {
-        Task::done(Message::ChangeTheme(thing.into()))
+        Task::done(Message::ChangeTheme(thing.into::<Theme>()))
     }
 
     fn actions(&self) -> &'static [Action] {

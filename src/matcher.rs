@@ -124,7 +124,7 @@ fn matches_words(pattern: &str, mut words: &[impl AsRef<str>]) -> MatchResult {
     let mut last_current_str = current_str;
     words = &words[1..];
     let mut last_terminator = true;
-    let last_i_perfect_val = pattern.len() - 1;
+    let last_i_perfect_val = pattern.len().saturating_sub(1);
 
     let mut perfect = true;
     for (i, c) in pattern.char_indices() {

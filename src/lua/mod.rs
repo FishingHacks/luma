@@ -1,15 +1,149 @@
-use std::sync::Arc;
+use std::{
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+    time::Instant,
+};
 
 use iced::{
     Task, clipboard,
+    futures::StreamExt as _,
     keyboard::{Key, Modifiers},
     widget,
 };
 use mlua::{
-    AnyUserData, FromLua, FromLuaMulti, Lua, LuaOptions, MaybeSend, StdLib, Table, UserData, Value,
+    AnyUserData, AsChunk, FromLua, FromLuaMulti, Function, Lua, LuaOptions, MaybeSend, StdLib,
+    Table, UserData, Value,
 };
 
-use crate::{Action, Message, matcher::MatcherInput};
+use crate::{
+    Action, CustomData, Entry, Message, Plugin, filter_service::ResultBuilderRef,
+    matcher::MatcherInput,
+};
+
+pub struct LuaEntry {
+    name: String,
+    subtitle: String,
+    data: Value,
+    perfect_match: bool,
+}
+
+impl FromLua for LuaEntry {
+    fn from_lua(value: Value, lua: &Lua) -> mlua::Result<Self> {
+        let table = Table::from_lua(value, lua)?;
+        Ok(Self {
+            name: table.get("name")?,
+            subtitle: table.get::<Option<String>>("subtitle")?.unwrap_or_default(),
+            data: table.get("data")?,
+            perfect_match: table.get::<Option<bool>>("perfect_match")?.unwrap_or(false),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct LuaPlugin {
+    actions: Arc<[Action]>,
+    prefix: Arc<str>,
+    get_for_values: Function,
+    init: Option<Function>,
+    handle_pre: Option<Function>,
+    handle_post: Option<Function>,
+    me: Table,
+    lua: Lua,
+}
+
+impl LuaPlugin {
+    fn from_lua(value: Value, lua: &Lua, prefix: impl Into<Arc<str>>) -> mlua::Result<Self> {
+        let table: Table = FromLua::from_lua(value, lua)?;
+        let actions_data: Vec<AnyUserData> = table.get("actions")?;
+        let mut actions = Vec::with_capacity(actions_data.len());
+        for action in actions_data {
+            actions.push(action.take()?);
+        }
+        Ok(Self {
+            actions: actions.into(),
+            prefix: prefix.into(),
+            get_for_values: table.get("get_for_values")?,
+            init: table.get("init")?,
+            handle_pre: table.get("handle_pre")?,
+            handle_post: table.get("handle_post")?,
+            me: table,
+            lua: lua.clone(),
+        })
+    }
+}
+
+impl LuaPlugin {
+    async fn get_for_values(
+        &self,
+        input: Arc<MatcherInput>,
+        builder: ResultBuilderRef<'_>,
+    ) -> mlua::Result<()> {
+        let thread = self
+            .lua
+            .create_thread(self.get_for_values.clone())?
+            .into_async::<Option<LuaEntry>>((&self.me, MatcherInputUserData(input)));
+        thread
+            .filter_map(async |v| v.ok().flatten())
+            .for_each(|v| async move {
+                builder
+                    .add(
+                        Entry::new(v.name, v.subtitle, CustomData::new(v.data))
+                            .perfect(v.perfect_match),
+                    )
+                    .await;
+            })
+            .await;
+        Ok(())
+    }
+}
+
+impl Plugin for LuaPlugin {
+    fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    fn actions(&self) -> &[Action] {
+        &self.actions
+    }
+
+    async fn get_for_values_arc(&self, input: Arc<MatcherInput>, builder: ResultBuilderRef<'_>) {
+        if let Err(e) = LuaPlugin::get_for_values(self, input, builder).await {
+            log::error!("In {}.lua: {e}", self.prefix);
+        }
+    }
+    async fn get_for_values(&self, _: &MatcherInput, _: ResultBuilderRef<'_>) {
+        unreachable!()
+    }
+
+    fn init(&mut self) {
+        if let Some(ref f) = self.init {
+            if let Err(e) = f.call::<Value>(&self.me) {
+                log::error!("In {}.lua: {e}", self.prefix);
+            }
+        }
+    }
+
+    fn handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
+        let thing = thing.into::<Value>();
+        if let Some(ref f) = self.handle_pre {
+            match f.call::<TaskWrapper>((&self.me, thing, action)) {
+                Err(e) => log::error!("In {}.lua: {e}", self.prefix),
+                Ok(v) => return v.0,
+            }
+        }
+        Task::none()
+    }
+    fn handle_post(&self, thing: CustomData, action: &str) -> Task<Message> {
+        let thing = thing.into::<Value>();
+        if let Some(ref f) = self.handle_post {
+            match f.call::<TaskWrapper>((&self.me, thing, action)) {
+                Err(e) => log::error!("In {}.lua: {e}", self.prefix),
+                Ok(v) => return v.0,
+            }
+        }
+        Task::none()
+    }
+}
 
 #[repr(transparent)]
 pub struct MatcherInputUserData(Arc<MatcherInput>);
@@ -206,24 +340,10 @@ pub fn proxy(lua: &Lua, proxied_value: Table) -> mlua::Result<Table> {
     let metatable = lua.create_table()?;
     metatable.raw_set(
         "__index",
-        lua.create_function(move |lua, (table, key): (Value, Value)| {
+        lua.create_function(move |_, (table, key): (Value, Value)| {
             let res: Value = proxied_value.get(&key)?;
             let res = match res {
                 Value::Table(ref v) if *v == proxied_value => table,
-                Value::Table(v) => {
-                    let Value::Table(table) = table else {
-                        return Ok(Value::Nil);
-                    };
-                    let proxy_value = table.get(&key)?;
-                    match proxy_value {
-                        Value::Nil => {
-                            let value = proxy(lua, v)?;
-                            table.raw_set(key, &value)?;
-                            Value::Table(value)
-                        }
-                        v => v,
-                    }
-                }
                 v => v,
             };
             Ok(res)
@@ -238,6 +358,21 @@ pub fn setup_runtime() -> mlua::Result<Lua> {
     let libs = StdLib::COROUTINE | StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH;
     let lua = Lua::new_with(libs, LuaOptions::new())?;
     let luma_module = luma_module(&lua)?;
-    lua.globals().set("luma", proxy(&lua, luma_module)?)?;
+    lua.globals().set("luma", luma_module)?;
     Ok(lua)
 }
+
+pub fn load_lua_plugin<'a>(
+    lua: &Lua,
+    src: impl AsChunk<'a>,
+    prefix: impl Into<Arc<str>>,
+) -> mlua::Result<LuaPlugin> {
+    let value = lua
+        .load(src)
+        .set_environment(proxy(lua, lua.globals())?)
+        .call(())?;
+    LuaPlugin::from_lua(value, lua, prefix)
+}
+
+pub static LUA_PLUGIN_DIR: LazyLock<PathBuf> =
+    LazyLock::new(|| std::env::current_dir().unwrap().join("lua_plugins"));

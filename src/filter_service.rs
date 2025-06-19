@@ -19,7 +19,7 @@ use iced::{
 };
 use smol::{future::FutureExt, lock::RwLock};
 
-use crate::{AnyPlugin, CustomData, Entry, GenericEntry, matcher::MatcherInput};
+use crate::{AnyPlugin, Entry, GenericEntry, matcher::MatcherInput};
 
 #[derive(Clone, Copy)]
 pub struct ResultBuilderRef<'a> {
@@ -32,7 +32,8 @@ impl<'a> ResultBuilderRef<'a> {
         Self { plugin_id, builder }
     }
 
-    pub async fn add(&self, entry: Entry) {
+    /// returns false if you should stop adding entries.
+    pub async fn add(&self, entry: Entry) -> bool {
         self.builder
             .commit(std::iter::once(GenericEntry {
                 name: entry.name,
@@ -43,13 +44,15 @@ impl<'a> ResultBuilderRef<'a> {
             }))
             .await
     }
-    pub async fn commit(&self, iter: impl Iterator<Item = Entry>) {
+
+    /// returns false if you should stop adding entries.
+    pub async fn commit(&self, iter: impl Iterator<Item = Entry>) -> bool {
         self.builder
             .commit(iter.map(|entry| GenericEntry {
                 name: entry.name,
                 subtitle: entry.subtitle,
                 plugin: self.plugin_id,
-                data: CustomData::new(entry.data),
+                data: entry.data,
                 perfect_match: entry.perfect_match,
             }))
             .await
@@ -63,17 +66,19 @@ pub struct ResultBuilder {
 }
 
 impl ResultBuilder {
-    pub async fn commit(&self, iter: impl Iterator<Item = GenericEntry>) {
+    /// returns false if you should stop adding entries.
+    pub async fn commit(&self, iter: impl Iterator<Item = GenericEntry>) -> bool {
         if self.should_stop.load(Ordering::Relaxed) {
-            return;
+            return false;
         }
         let mut writer = self.results.write().await;
         for entry in iter {
             writer.push(entry);
             if self.should_stop.load(Ordering::Relaxed) {
-                return;
+                return false;
             }
         }
+        true
     }
 
     pub fn to_inner(self) -> Vec<GenericEntry> {
@@ -177,9 +182,9 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                     for (id, plugin) in plugins.iter().enumerate() {
                         if query.starts_with(plugin.any_prefix()) {
                             query.drain(..plugin.any_prefix().len());
-                            let input = MatcherInput::new(query, true);
+                            let input = Arc::new(MatcherInput::new(query, true));
                             let future = Either(
-                                plugin.any_get_for_values(&input, &result_builder, id),
+                                plugin.any_get_for_values(input, &result_builder, id),
                                 next_msg,
                             );
                             if future.await {
@@ -194,13 +199,13 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                         }
                     }
 
-                    let input = MatcherInput::new(query, false);
+                    let input = Arc::new(MatcherInput::new(query, false));
                     let futures = Joinall(
                         plugins
                             .iter()
                             .enumerate()
                             .map(|(id, plugin)| {
-                                plugin.any_get_for_values(&input, &result_builder, id)
+                                plugin.any_get_for_values(input.clone(), &result_builder, id)
                             })
                             .collect(),
                         next_msg,

@@ -42,9 +42,10 @@ impl Plugin for ConvertPlugin {
                 let result = amount * conversion.2;
                 let name = format!("{} {}", result, conversion.1);
                 let subtitle = format!("Converted from {} {}", amount, conversion.0);
-                return builder
+                builder
                     .add(Entry::new(name, subtitle, CustomData::new((result, conversion.1))).pin())
                     .await;
+                return;
             }
         }
     }
