@@ -6,6 +6,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     task::Poll,
+    time::Duration,
 };
 
 use iced::futures::{
@@ -17,7 +18,7 @@ use iced::{
     futures::{Stream, StreamExt},
     stream::channel,
 };
-use smol::{future::FutureExt, lock::RwLock};
+use smol::{Timer, future::FutureExt, lock::RwLock};
 
 use crate::{AnyPlugin, Entry, GenericEntry, matcher::MatcherInput};
 
@@ -85,8 +86,8 @@ impl ResultBuilder {
         true
     }
 
-    pub fn to_inner(self) -> Vec<GenericEntry> {
-        self.results.into_inner()
+    pub fn to_inner(&self) -> &RwLock<Vec<GenericEntry>> {
+        &self.results
     }
 
     pub fn should_stop(&self) -> bool {
@@ -167,7 +168,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
 
         std::thread::spawn(move || {
             smol::future::block_on(async {
-                'main: loop {
+                loop {
                     let (plugins, mut query, should_stop) = match StreamExt::next(&mut receiver)
                         .await
                     {
@@ -182,44 +183,58 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                         }
                     };
                     let mut next_message_fn = async || _ = receiver.next().await;
-                    let next_msg = pin!(next_message_fn());
                     let result_builder = ResultBuilder {
                         results: RwLock::default(),
                         should_stop,
                     };
-                    for (id, plugin) in plugins.iter().enumerate() {
-                        if query.starts_with(plugin.any_prefix()) {
-                            query.drain(..plugin.any_prefix().len());
-                            let input = Arc::new(MatcherInput::new(query, true));
-                            let future = Either(
-                                plugin.any_get_for_values(input, &result_builder, id),
-                                next_msg,
-                            );
-                            if future.await {
-                                let res = output
-                                    .send(CollectorMessage::Finished(result_builder.to_inner()))
-                                    .await;
-                                if handle_send_result(res) {
-                                    return;
-                                }
-                            }
-                            continue 'main;
-                        }
-                    }
 
-                    let input = Arc::new(MatcherInput::new(query, false));
-                    let futures = Joinall(
+                    let mut futures = 'block: {
+                        for (id, plugin) in plugins.iter().enumerate() {
+                            if query.starts_with(plugin.any_prefix()) {
+                                query.drain(..plugin.any_prefix().len());
+                                let input = Arc::new(MatcherInput::new(query, true));
+                                break 'block vec![plugin.any_get_for_values(
+                                    input,
+                                    &result_builder,
+                                    id,
+                                )];
+                            }
+                        }
+
+                        let input = Arc::new(MatcherInput::new(query, false));
                         plugins
                             .iter()
                             .enumerate()
                             .map(|(id, plugin)| {
                                 plugin.any_get_for_values(input.clone(), &result_builder, id)
                             })
-                            .collect(),
-                        next_msg,
-                    );
-                    if futures.await {
-                        let mut entries = result_builder.to_inner();
+                            .collect::<Vec<_>>()
+                    };
+
+                    let mut sent_previously = usize::MAX;
+                    loop {
+                        if futures.is_empty() {
+                            break;
+                        }
+                        let next_msg = pin!(next_message_fn());
+                        let res =
+                            Joinall(futures, Timer::after(Duration::from_millis(200)), next_msg)
+                                .await;
+                        match res {
+                            JoinAllResult::Abort => break,
+                            JoinAllResult::Done(moved_futures) => futures = moved_futures,
+                        }
+                        let mut writer = result_builder.to_inner().write_blocking();
+                        if writer.len() == sent_previously {
+                            continue;
+                        }
+                        sent_previously = writer.len();
+                        let mut entries = if futures.is_empty() {
+                            std::mem::take(&mut *writer)
+                        } else {
+                            writer.clone()
+                        };
+                        drop(writer);
                         entries.sort_by(|a, b| {
                             if a.perfect_match == b.perfect_match {
                                 cmp::Ordering::Equal
@@ -245,7 +260,7 @@ fn handle_send_result(res: Result<(), SendError>) -> bool {
         Ok(()) => false,
         Err(e) if e.is_full() => {
             log::debug!("Error: Frontend is not responding: {e:?}");
-            false
+            true
         }
         Err(e) if e.is_disconnected() => {
             log::debug!("collector receiver is disconnected, exiting: {e:?}");
@@ -258,10 +273,15 @@ fn handle_send_result(res: Result<(), SendError>) -> bool {
     }
 }
 
-struct Joinall<'a, F: Future<Output = ()>>(Vec<BoxFuture<'a, ()>>, F);
+struct Joinall<'a, F: Future<Output = ()>>(Vec<BoxFuture<'a, ()>>, Timer, F);
 
-impl<F: Future<Output = ()> + Unpin> Future for Joinall<'_, F> {
-    type Output = bool;
+enum JoinAllResult<'a> {
+    Done(Vec<BoxFuture<'a, ()>>),
+    Abort,
+}
+
+impl<'a, F: Future<Output = ()> + Unpin> Future for Joinall<'a, F> {
+    type Output = JoinAllResult<'a>;
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
@@ -269,31 +289,12 @@ impl<F: Future<Output = ()> + Unpin> Future for Joinall<'_, F> {
     ) -> std::task::Poll<Self::Output> {
         self.0
             .retain_mut(|fut| matches!(fut.poll(cx), Poll::Pending));
-        if self.0.is_empty() {
-            Poll::Ready(true)
-        } else if self.1.poll(cx).is_ready() {
-            return Poll::Ready(false);
+        if self.0.is_empty() || self.1.poll(cx).is_ready() {
+            Poll::Ready(JoinAllResult::Done(std::mem::take(&mut self.0)))
+        } else if self.2.poll(cx).is_ready() {
+            return Poll::Ready(JoinAllResult::Abort);
         } else {
             Poll::Pending
         }
-    }
-}
-
-struct Either<F1: Future<Output = ()> + Unpin, F2: Future<Output = ()> + Unpin>(F1, F2);
-
-impl<F1: Future<Output = ()> + Unpin, F2: Future<Output = ()> + Unpin> Future for Either<F1, F2> {
-    type Output = bool;
-
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        if self.0.poll(cx).is_ready() {
-            return Poll::Ready(true);
-        }
-        if self.1.poll(cx).is_ready() {
-            return Poll::Ready(false);
-        }
-        Poll::Pending
     }
 }

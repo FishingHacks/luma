@@ -975,6 +975,7 @@ fn main() -> iced::Result {
                 lua: lua.clone(),
             };
             state.add_plugin::<ControlPlugin>();
+            state.add_plugin::<ControlPlugin>();
             state.add_plugin::<ThemePlugin>();
             state.add_plugin::<DicePlugin>();
             state.add_plugin::<FendPlugin>();
