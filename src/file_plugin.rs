@@ -23,7 +23,7 @@ fn iter<'a>(
         .map(|(v, perfect_match)| {
             (
                 v.clone(),
-                v.file_name().map(|v| v.len()).unwrap_or(0),
+                v.file_name().map_or(0, OsStr::len),
                 perfect_match,
             )
         })
@@ -42,7 +42,6 @@ fn iter<'a>(
 }
 
 impl Plugin for FilePlugin {
-    #[inline(always)]
     fn prefix(&self) -> &'static str {
         "file"
     }

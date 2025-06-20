@@ -1,3 +1,7 @@
+#![warn(clippy::pedantic)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::too_many_lines)]
 use std::{
     borrow::Cow,
     collections::BTreeMap,
@@ -8,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use config::{BlurAction, Config, FileWatcherEntry, Files};
+use config::{BlurAction, Config, FileWatcherEntry, Files, ScanFilter};
 use control_plugin::ControlPlugin;
 use convert_plugin::ConvertPlugin;
 use dice_plugin::DicePlugin;
@@ -64,7 +68,7 @@ pub static CONFIG: LazyLock<Arc<Config>> = LazyLock::new(|| {
                 path: Path::new("/home/fishi").into(),
                 watch: true,
                 reindex_every: None,
-                filter: Default::default(),
+                filter: ScanFilter::default(),
             }],
             reindex_at_startup: false,
         },
@@ -84,6 +88,7 @@ impl<T: std::any::Any + Clone + Send + Sync> CustomDataCompatible for T {
 
 pub trait AsCustomData {
     fn from_custom_data(custom_data: CustomData) -> Self;
+    #[must_use]
     fn to_custom_data(&self) -> Self;
 }
 
@@ -138,11 +143,13 @@ impl Entry {
     /// this function pins this entry to the top of the list.
     ///
     /// Effectively this is the same as [`Entry::perfect`] called with true
+    #[must_use]
     pub fn pin(mut self) -> Self {
         // this effectively pins it to the top
         self.perfect_match = true;
         self
     }
+    #[must_use]
     pub fn perfect(mut self, perfect: bool) -> Self {
         self.perfect_match = perfect;
         self
@@ -250,6 +257,10 @@ impl CustomData {
         Self(Box::new(value))
     }
 
+    /// # Panics
+    ///
+    /// Panics when T is not the same value as the one stored in this [`CustomData`]
+    #[must_use]
     pub fn into<T: CustomDataCompatible>(self) -> T {
         *(self.0 as Box<dyn std::any::Any>)
             .downcast()
@@ -283,6 +294,7 @@ impl GenericEntry {
         }
     }
 
+    #[must_use]
     pub fn perfect(mut self, perfect: bool) -> Self {
         self.perfect_match = perfect;
         self
@@ -322,6 +334,7 @@ pub struct Action {
 }
 
 impl Action {
+    #[must_use]
     pub const fn new(name: &'static str, id: &'static str, shortcut: (Modifiers, Key)) -> Self {
         Self {
             name: Cow::Borrowed(name),
@@ -331,25 +344,30 @@ impl Action {
         }
     }
 
+    #[must_use]
     pub const fn without_shortcut(name: &'static str, id: &'static str) -> Self {
         Self::new(name, id, (Modifiers::empty(), Key::Unidentified))
     }
 
     /// Constructs the suggest action (tab)
+    #[must_use]
     pub const fn suggest(name: &'static str, id: &'static str) -> Self {
         Self::new(name, id, (Modifiers::empty(), Key::Named(Named::Tab)))
     }
 
     /// Constructs the default action. This should always be the first entry.
+    #[must_use]
     pub const fn default(name: &'static str, id: &'static str) -> Self {
         Self::new(name, id, (Modifiers::empty(), Key::Named(Named::Enter)))
     }
 
+    #[must_use]
     pub const fn keep_open(mut self) -> Self {
         self.closes = false;
         self
     }
 
+    #[must_use]
     pub const fn new_owned(name: String, id: String, shortcut: (Modifiers, Key)) -> Self {
         Self {
             name: Cow::Owned(name),
@@ -359,22 +377,27 @@ impl Action {
         }
     }
 
+    #[must_use]
     pub const fn without_shortcut_owned(name: String, id: String) -> Self {
         Self::new_owned(name, id, (Modifiers::empty(), Key::Unidentified))
     }
 
     /// Constructs the suggest action (tab)
+    #[must_use]
     pub const fn suggest_owned(name: String, id: String) -> Self {
         Self::new_owned(name, id, (Modifiers::empty(), Key::Named(Named::Tab)))
     }
 
     /// Constructs the default action. This should always be the first entry.
+    #[must_use]
     pub const fn default_owned(name: String, id: String) -> Self {
         Self::new_owned(name, id, (Modifiers::empty(), Key::Named(Named::Enter)))
     }
 }
 
 pub fn action_format_key(key: &Key, modifiers: Modifiers, s: &mut String) {
+    use std::fmt::Write;
+
     if matches!(key, Key::Unidentified) {
         return;
     }
@@ -393,10 +416,9 @@ pub fn action_format_key(key: &Key, modifiers: Modifiers, s: &mut String) {
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         s.push_str("Super + ");
     }
-    use std::fmt::Write;
     match key {
         Key::Named(named) => {
-            write!(s, "{named:?}").expect("writing to a string should never fail!")
+            write!(s, "{named:?}").expect("writing to a string should never fail!");
         }
         Key::Character(c) => s.push_str(c.as_str()),
         Key::Unidentified => s.push_str("unknown key"),
@@ -463,7 +485,7 @@ impl State {
             col = col.push(
                 button(inner_col)
                     .width(Length::Fill)
-                    .height(Length::Fixed(ENTRY_SIZE as f32))
+                    .height(Length::Fixed(ENTRY_SIZE))
                     .style(if selected {
                         button::primary
                     } else {
@@ -493,7 +515,7 @@ impl State {
                     } else {
                         button::text
                     })
-                    .height(Length::Fixed(ACTION_SIZE as f32))
+                    .height(Length::Fixed(ACTION_SIZE))
                     .on_press(Message::None),
                 );
             }
@@ -605,12 +627,11 @@ impl State {
                     return Task::batch([
                         task,
                         window::get_size(window_id).then(move |size| {
-                            window::resize(window_id, Size::new(size.width, SEARCH_SIZE as f32))
+                            window::resize(window_id, Size::new(size.width, SEARCH_SIZE))
                         }),
                     ]);
-                } else {
-                    return task;
                 }
+                return task;
             }
             Message::UpdateSearch(q) => {
                 self.search_query = q;
@@ -619,7 +640,7 @@ impl State {
                 self.hide_actions();
                 if self.search_query.is_empty() {
                     return window::get_size(window_id).then(move |size| {
-                        window::resize(window_id, Size::new(size.width, SEARCH_SIZE as f32))
+                        window::resize(window_id, Size::new(size.width, SEARCH_SIZE))
                     });
                 }
             }
@@ -646,9 +667,10 @@ impl State {
             Message::Submit => {
                 return self.run(
                     self.selected,
-                    match self.showing_actions {
-                        true => self.selected_action,
-                        false => 0,
+                    if self.showing_actions {
+                        self.selected_action
+                    } else {
+                        0
                     },
                 );
             }
@@ -670,7 +692,7 @@ impl State {
                 self.results.clear();
                 self.hide_actions();
                 if let Some(v) = self.collector_controller.as_mut() {
-                    v.stop()
+                    v.stop();
                 }
                 if let Some(window) = self.window.take() {
                     return iced::window::close(window);
@@ -690,7 +712,7 @@ impl State {
                 self.hide_actions();
                 self.results = results;
                 let new_height =
-                    (self.results.len().min(self.num_entries) * ENTRY_SIZE + SEARCH_SIZE) as f32;
+                    self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE + SEARCH_SIZE;
                 return window::get_size(window_id).then(move |size| {
                     window::resize(window_id, Size::new(size.width, new_height))
                 });
@@ -706,9 +728,9 @@ impl State {
                 if !self.results.is_empty() {
                     self.showing_actions = true;
                     self.selected_action = 0;
-                    let new_height = (self.results.len().min(self.num_entries) * ENTRY_SIZE
+                    let new_height = self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE
                         + SEARCH_SIZE
-                        + actions.len() * ACTION_SIZE) as f32;
+                        + actions.len() as f32 * ACTION_SIZE;
                     return window::get_size(window_id).then(move |size| {
                         window::resize(window_id, Size::new(size.width, new_height))
                     });
@@ -717,7 +739,7 @@ impl State {
             Message::HideActions => {
                 self.hide_actions();
                 let new_height =
-                    (self.results.len().min(self.num_entries) * ENTRY_SIZE + SEARCH_SIZE) as f32;
+                    self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE + SEARCH_SIZE;
                 return window::get_size(window_id).then(move |size| {
                     window::resize(window_id, Size::new(size.width, new_height))
                 });
@@ -747,6 +769,7 @@ impl State {
         Task::none()
     }
 
+    #[must_use]
     pub fn get_plugin(&self, s: &str) -> Option<&dyn AnyPlugin> {
         self.plugins
             .iter()
@@ -810,9 +833,9 @@ pub fn change_theme(new_theme: Theme) -> Task<Message> {
     Task::done(Message::ChangeTheme(new_theme))
 }
 
-const SEARCH_SIZE: usize = 31;
-const ENTRY_SIZE: usize = 56;
-const ACTION_SIZE: usize = 31;
+const SEARCH_SIZE: f32 = 31.0;
+const ENTRY_SIZE: f32 = 56.0;
+const ACTION_SIZE: f32 = 31.0;
 
 fn daemon_view(state: &State, id: window::Id) -> Element<'_, Message> {
     if let Some(main_window_id) = state.window {
@@ -836,20 +859,18 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 position: Position::SpecificWith(|winsize, resolution| {
                     Point::new(
                         (resolution.width - winsize.width).max(0.0) / 2.0,
-                        (resolution.height - SEARCH_SIZE as f32 - 12.0 * ENTRY_SIZE as f32)
-                            .max(0.0)
-                            / 2.0,
+                        (resolution.height - SEARCH_SIZE - 12.0 * ENTRY_SIZE).max(0.0) / 2.0,
                     )
                 }),
                 ..Default::default()
             };
-            settings.size.height = SEARCH_SIZE as f32;
+            settings.size.height = SEARCH_SIZE;
             let (id, open_window_task) = window::open(settings);
             let open_window_task = open_window_task.map(|_| Message::None);
             log::trace!("opened main window with id {id:?}");
             let old_window = state.window.replace(id);
             state.init_plugins();
-            let focus_task = text_input::focus(state.text_input.clone()).map(|_: ()| Message::None);
+            let focus_task = text_input::focus(state.text_input.clone()).map(|()| Message::None);
             match old_window {
                 Some(id) => Task::batch([window::close(id), open_window_task, focus_task]),
                 None => Task::batch([open_window_task, focus_task]),
@@ -866,8 +887,7 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
         } => state
             .plugins
             .get(plugin)
-            .map(|plugin| plugin.any_handle_post(data, &action))
-            .unwrap_or_else(Task::none),
+            .map_or_else(Task::none, |plugin| plugin.any_handle_post(data, &action)),
         Message::Exit => iced::exit(),
         Message::None => Task::none(),
         Message::IndexerMessage(FileIndexResponse::IndexFinished) if state.window.is_none() => {

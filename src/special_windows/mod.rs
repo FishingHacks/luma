@@ -1,4 +1,4 @@
-use iced::{Element, Size, Task, window};
+use iced::{Element, Size, window};
 
 use crate::Message;
 
@@ -18,13 +18,6 @@ impl Clone for SpecialWindowState {
 }
 
 impl SpecialWindowState {
-    pub fn update(&mut self, message: Message) -> Task<Message> {
-        match self {
-            SpecialWindowState::ErrorPopup(s) => s.update(message),
-            SpecialWindowState::WarnPopup(s) => s.update(message),
-        }
-    }
-
     pub fn view(&self, id: window::Id) -> Element<'_, Message> {
         match self {
             SpecialWindowState::ErrorPopup(state) => state.view(id),
@@ -32,6 +25,7 @@ impl SpecialWindowState {
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     pub fn size(&self) -> Option<Size> {
         match self {
             SpecialWindowState::ErrorPopup(_) | SpecialWindowState::WarnPopup(_) => Some(Size {

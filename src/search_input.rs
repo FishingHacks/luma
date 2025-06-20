@@ -58,7 +58,7 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
     ) {
         Widget::draw(
             &self.0, tree, renderer, theme, style, layout, cursor, viewport,
-        )
+        );
     }
 
     fn size_hint(&self) -> iced::Size<iced::Length> {
@@ -129,7 +129,7 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
                             // actions list that shows up when holding down alt.)
                             if (*modifiers | Modifiers::ALT) == Modifiers::ALT =>
                         {
-                            shell.publish(Message::Submit)
+                            shell.publish(Message::Submit);
                         }
                         Key::Named(Named::PageUp) => shell.publish(Message::Go10Up),
                         Key::Named(Named::PageDown) => shell.publish(Message::Go10Down),
@@ -138,7 +138,7 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
                         Key::Named(Named::Escape) => shell.publish(Message::HideMainWindow),
                         Key::Named(Named::Alt) => shell.publish(Message::ShowActions),
                         Key::Named(Named::Tab) => {
-                            shell.publish(Message::KeyPressed(Key::Named(Named::Tab), *modifiers))
+                            shell.publish(Message::KeyPressed(Key::Named(Named::Tab), *modifiers));
                         }
                         _ if ALLOWED_ACTION_MODIFIERS.intersects(*modifiers) => {
                             shell.publish(Message::KeyPressed(key.clone(), *modifiers));

@@ -18,7 +18,6 @@ static THEMES: LazyLock<Vec<(String, Theme)>> = LazyLock::new(|| {
 pub struct ThemePlugin;
 
 impl Plugin for ThemePlugin {
-    #[inline(always)]
     fn prefix(&self) -> &'static str {
         "theme"
     }

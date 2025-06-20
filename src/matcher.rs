@@ -5,7 +5,6 @@ pub struct MatcherInput {
     has_prefix: bool,
 }
 
-#[inline(always)]
 fn is_terminator(c: char) -> bool {
     matches!(
         c,
@@ -152,12 +151,11 @@ fn matches_words(pattern: &str, mut words: &[impl AsRef<str>]) -> MatchResult {
             last_terminator = false;
             let next_char = current_str.chars().next();
             if let Some(next) = next_char {
-                match c.to_ascii_lowercase() == next {
-                    true => current_str = &current_str[next.len_utf8()..],
-                    false => {
-                        perfect = false;
-                        current_str = last_current_str;
-                    }
+                if c.to_ascii_lowercase() == next {
+                    current_str = &current_str[next.len_utf8()..];
+                } else {
+                    perfect = false;
+                    current_str = last_current_str;
                 }
             } else {
                 perfect = false;

@@ -25,7 +25,6 @@ pub struct RunPlugin {
 }
 
 impl Plugin for RunPlugin {
-    #[inline(always)]
     fn prefix(&self) -> &'static str {
         "run"
     }
@@ -60,9 +59,8 @@ impl Plugin for RunPlugin {
                 if parsed.entry.no_display.unwrap_or(false) {
                     continue;
                 }
-                let application = match parsed.entry.entry_type {
-                    EntryType::Application(application) => application,
-                    _ => continue,
+                let EntryType::Application(application) = parsed.entry.entry_type else {
+                    continue;
                 };
                 let name = parsed.entry.name.get_variant("en");
                 if programs.contains(name) {
@@ -111,7 +109,7 @@ impl Plugin for RunPlugin {
             let mut command = Command::new(command);
             command.args(split);
             if file.terminal {
-                utils::run_in_terminal(command);
+                utils::run_in_terminal(&command);
             } else {
                 utils::run_cmd(command);
             }

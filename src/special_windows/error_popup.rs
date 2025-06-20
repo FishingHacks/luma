@@ -1,5 +1,5 @@
 use iced::{
-    Color, Element, Length, Task,
+    Color, Element, Length,
     alignment::{Horizontal, Vertical},
     widget::{button, column, container, row, svg, text, vertical_space},
     window,
@@ -15,10 +15,6 @@ pub struct State {
 const ERR_ICON: &[u8] = include_bytes!("../../icons/exclamation-circle.svg");
 
 impl State {
-    pub fn update(&mut self, _: Message) -> Task<Message> {
-        Task::none()
-    }
-
     pub fn view(&self, id: window::Id) -> Element<'_, Message> {
         let row = row![
             svg(svg::Handle::from_memory(ERR_ICON))

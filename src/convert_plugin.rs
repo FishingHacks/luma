@@ -15,13 +15,12 @@ static CONVERSIONS: &[(&str, &str, f64)] = &[
 pub struct ConvertPlugin;
 
 impl Plugin for ConvertPlugin {
-    #[inline(always)]
     fn prefix(&self) -> &'static str {
         "convert"
     }
 
     async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
-        let mut words = input.input().split(" ");
+        let mut words = input.input().split(' ');
         // <value> <unit> to <unit>
         let Some(value) = words.next() else { return };
         let Some(unit_from) = words.next() else {
@@ -55,7 +54,7 @@ impl Plugin for ConvertPlugin {
     fn handle_pre(&self, thing: CustomData, action: &str) -> iced::Task<Message> {
         if action == "copy" {
             let result = thing.into::<(f64, &'static str)>();
-            let value = if result.0 == result.0.floor() {
+            let value = if (result.0 - result.0.floor()).abs() < f64::EPSILON {
                 format!("{} {}", result.0 as i64, result.1)
             } else {
                 format!("{} {}", result.0, result.1)
@@ -63,7 +62,7 @@ impl Plugin for ConvertPlugin {
             clipboard::write(value)
         } else {
             let result = thing.into::<(f64, &'static str)>();
-            let value = if result.0 == result.0.floor() {
+            let value = if (result.0 - result.0.floor()).abs() < f64::EPSILON {
                 format!("convert {} {} to", result.0 as i64, result.1)
             } else {
                 format!("convert {} {} to", result.0, result.1)

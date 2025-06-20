@@ -34,8 +34,7 @@ static ACTIONS: &[Action] = &[Action::Quit, Action::Hide, Action::ShowLogs];
 pub struct ControlPlugin;
 
 impl Plugin for ControlPlugin {
-    #[inline(always)]
-    fn prefix(&self) -> &str {
+    fn prefix(&self) -> &'static str {
         "control"
     }
 

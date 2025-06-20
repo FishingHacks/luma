@@ -1,7 +1,6 @@
 use std::{
     path::PathBuf,
     sync::{Arc, LazyLock},
-    time::Instant,
 };
 
 use iced::{
@@ -183,7 +182,7 @@ impl FromLua for TaskWrapper {
             Value::Table(table) => Ok(TaskWrapper(Task::batch(
                 table
                     .pairs()
-                    .filter_map(|v| v.ok())
+                    .filter_map(Result::ok)
                     .map(|(_, v): (Value, TaskWrapper)| v.0),
             ))),
             Value::UserData(any_user_data) => any_user_data.take(),
@@ -214,7 +213,7 @@ impl FromLua for KeybindWrapper {
                         Ok(s) => mlua::Error::FromLuaConversionError {
                             from: value.type_name(),
                             to: "Keybind".into(),
-                            message: Some(format!("{:?} is not a valid keybind!", s)),
+                            message: Some(format!("{s:?} is not a valid keybind!")),
                         },
                     })?;
                 Ok(Self(modifiers, key))
@@ -249,8 +248,6 @@ impl FromLua for KeybindWrapper {
 }
 
 pub fn luma_module(lua: &Lua) -> mlua::Result<Table> {
-    let root = lua.create_table()?;
-
     fn task_fn<V: FromLuaMulti>(
         lua: &Lua,
         f: impl Fn(&Lua, V) -> Task<Message> + 'static + MaybeSend,
@@ -272,24 +269,26 @@ pub fn luma_module(lua: &Lua) -> mlua::Result<Table> {
         Ok(Value::Function(func))
     }
 
+    let root = lua.create_table()?;
+
     // ┌───────┐
     // │ Tasks │
     // └───────┘
     let task = lua.create_table()?;
-    task.set("none", task_fn(lua, |_, _: ()| Task::none())?)?;
+    task.set("none", task_fn(lua, |_, ()| Task::none())?)?;
 
     // messages
     task.set("set_search", message(lua, Message::SetSearch)?)?;
     task.set("update_search", message(lua, Message::UpdateSearch)?)?;
-    task.set("show", message(lua, |_: ()| Message::Show)?)?;
-    task.set("hide", message(lua, |_: ()| Message::HideMainWindow)?)?;
-    task.set("exit", message(lua, |_: ()| Message::Exit)?)?;
+    task.set("show", message(lua, |()| Message::Show)?)?;
+    task.set("hide", message(lua, |()| Message::HideMainWindow)?)?;
+    task.set("exit", message(lua, |()| Message::Exit)?)?;
 
     // widgets
-    task.set("focus_next", task_fn(lua, |_, _: ()| widget::focus_next())?)?;
+    task.set("focus_next", task_fn(lua, |_, ()| widget::focus_next())?)?;
     task.set(
         "focus_prev",
-        task_fn(lua, |_, _: ()| widget::focus_previous())?,
+        task_fn(lua, |_, ()| widget::focus_previous())?,
     )?;
 
     // clipboard

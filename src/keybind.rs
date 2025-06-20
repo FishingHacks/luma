@@ -98,8 +98,7 @@ pub fn key_from_str(s: &str) -> Key {
     NAMED_KEY
         .get(&s as &str)
         .copied()
-        .map(Key::Named)
-        .unwrap_or_else(move || Key::Character(s.into()))
+        .map_or_else(move || Key::Character(s.into()), Key::Named)
 }
 
 pub fn modifier_from_str(s: &str) -> Option<Modifiers> {

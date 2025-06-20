@@ -31,7 +31,6 @@ impl Default for ScanFilter {
     }
 }
 
-#[inline(always)]
 fn def_false() -> bool {
     false
 }
@@ -99,14 +98,14 @@ impl Deref for ArcPath {
     type Target = Path;
 
     fn deref(&self) -> &Self::Target {
-        self.0.deref()
+        &self.0
     }
 }
 impl Deref for ArcStr {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        self.0.deref()
+        &self.0
     }
 }
 

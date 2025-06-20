@@ -48,12 +48,12 @@ pub fn file_index_service() -> impl Stream<Item = FileIndexResponse> {
                     return;
                 }
                 match event_sender.try_send(ev) {
-                    Ok(_) => {}
+                    Ok(()) => {}
                     Err(TrySendError::Closed(_)) => log::error!(
                         "the file indexing is stopped, but events are still received. this should never happen. you might want to restart the application and reindex directories you're watching."
                     ),
                     Err(TrySendError::Full(_)) => {
-                        log::error!("the unbounded event sender is full. This is pretty bad.")
+                        log::error!("the unbounded event sender is full. This is pretty bad.");
                     }
                 }
             }
@@ -69,7 +69,7 @@ pub fn file_index_service() -> impl Stream<Item = FileIndexResponse> {
         let config = pin::pin!(receiver.clone())
             .find_map(|v| match v {
                 FileIndexMessage::SetConfig(config) => Some(config),
-                _ => None,
+                FileIndexMessage::Reindex(_) => None,
             })
             .await;
         let Some(config) = config else {
@@ -78,7 +78,7 @@ pub fn file_index_service() -> impl Stream<Item = FileIndexResponse> {
         };
         let files = &config.files;
         let mut queue = HashSet::new();
-        for entry in files.entries.iter() {
+        for entry in &files.entries {
             if file_index.config.contains_key(&*entry.path) {
                 log::error!(
                     "The config contains multiple entries for {}.\nPlease edit the config at {}",
@@ -122,7 +122,7 @@ pub fn file_index_service() -> impl Stream<Item = FileIndexResponse> {
                     .await;
                     match res {
                         MainLoopResult::Stop => break,
-                        MainLoopResult::Working => continue,
+                        MainLoopResult::Working => {}
                         MainLoopResult::Idle => {
                             let fut1 = receiver.recv().map(Ok);
                             let fut2 = event_receiver.recv().map(Err);
@@ -135,7 +135,7 @@ pub fn file_index_service() -> impl Stream<Item = FileIndexResponse> {
                     }
                 }
                 log::debug!("Shutting down file indexer");
-            })
+            });
         });
     })
 }
@@ -182,8 +182,7 @@ async fn main_loop(
     loop {
         match prev_file_idx_msg
             .take()
-            .map(Ok)
-            .unwrap_or_else(|| receiver.try_recv())
+            .map_or_else(|| receiver.try_recv(), Ok)
         {
             Ok(FileIndexMessage::Reindex(path)) => _ = queue.insert(ArcPath(path)),
             Ok(FileIndexMessage::SetConfig(_)) => todo!(),
@@ -208,7 +207,7 @@ async fn main_loop(
     if event_receiver.is_empty() && prev_event.is_none() {
         if notify {
             match output.send(FileIndexResponse::IndexFinished).await {
-                Ok(_) => {}
+                Ok(()) => {}
                 // don't care about full
                 Err(e) if e.is_full() => {}
                 Err(e) => {
@@ -287,7 +286,7 @@ async fn main_loop(
     drop(writer);
 
     match output.send(FileIndexResponse::IndexFinished).await {
-        Ok(_) => {}
+        Ok(()) => {}
         // don't care about full
         Err(e) if e.is_full() => {}
         Err(e) => {
@@ -367,27 +366,27 @@ impl ScanFilter {
         if self.ignore_hidden && file_name.starts_with('.') {
             return false;
         }
-        for entry in self.deny_if_starts.iter() {
+        for entry in &self.deny_if_starts {
             if file_name.starts_with(&**entry) {
                 return false;
             }
         }
-        for entry in self.deny_if_ends.iter() {
+        for entry in &self.deny_if_ends {
             if file_name.ends_with(&**entry) {
                 return false;
             }
         }
-        for entry in self.deny_if_is.iter() {
+        for entry in &self.deny_if_is {
             if *file_name == **entry {
                 return false;
             }
         }
-        for entry in self.deny_if_contains.iter() {
+        for entry in &self.deny_if_contains {
             if file_name.contains(&**entry) {
                 return false;
             }
         }
-        for entry in self.deny_paths.iter() {
+        for entry in &self.deny_paths {
             if *path == **entry {
                 return false;
             }
@@ -468,21 +467,21 @@ impl FileIndex {
         drop(writer);
         let mut watcher = watcher.write().await;
         let mut did_popup = false;
-        for dir in indexed_data.directories.iter() {
+        for dir in &indexed_data.directories {
             let Err(e) = watcher.unwatch(dir) else {
                 continue;
             };
-            if !did_popup {
+            if did_popup {
+                log::debug!(
+                    "Failed to unwatch the {} and potentially more: {e:?}",
+                    dir.display()
+                );
+            } else {
                 log::error!(
                     "Failed to unwatch the {} and potentially more: {e:?}",
                     dir.display()
                 );
                 did_popup = true;
-            } else {
-                log::debug!(
-                    "Failed to unwatch the {} and potentially more: {e:?}",
-                    dir.display()
-                );
             }
         }
     }
@@ -512,7 +511,7 @@ impl FileIndexData {
                 did_err = true;
                 match e.kind {
                     ErrorKind::Generic(e) => {
-                        log::error!("While watching {}: {e}", dir.display())
+                        log::error!("While watching {}: {e}", dir.display());
                     }
                     ErrorKind::Io(e) => log::error!("While watching {}: {e}", dir.display()),
                     ErrorKind::PathNotFound | ErrorKind::WatchNotFound => return false,
@@ -564,11 +563,11 @@ impl FileIndexer {
                 watcher = None;
                 match e.kind {
                     ErrorKind::Generic(e) => {
-                        log::error!("While watching {}: {e}", root.display())
+                        log::error!("While watching {}: {e}", root.display());
                     }
                     ErrorKind::Io(e) => log::error!("While watching {}: {e}", root.display()),
                     ErrorKind::PathNotFound => {
-                        log::error!("While watching {}: path not found", root.display())
+                        log::error!("While watching {}: path not found", root.display());
                     }
                     ErrorKind::WatchNotFound => unreachable!(),
                     ErrorKind::InvalidConfig(_) => log::error!(
@@ -629,10 +628,12 @@ impl FileIndexer {
             let path: Arc<_> = entry.path().into();
             if self.entries.contains(&*path) || self.other_indexed_dirs.contains(&*path) {
                 continue;
-            } else if self.denied.contains(&path) || !self.scanfilter.is_allowed(&path) {
+            }
+            if self.denied.contains(&path) || !self.scanfilter.is_allowed(&path) {
                 self.denied.insert(path);
                 continue;
-            } else if !self.entries.insert(ArcPath(path.clone())) {
+            }
+            if !self.entries.insert(ArcPath(path.clone())) {
                 continue;
             }
             let Ok(ftype) = entry.file_type().await else {
@@ -651,7 +652,7 @@ impl FileIndexer {
                     self.watcher = None;
                     match e.kind {
                         ErrorKind::Generic(e) => {
-                            log::error!("While watching {}: {e}", path.display())
+                            log::error!("While watching {}: {e}", path.display());
                         }
                         ErrorKind::Io(e) => log::error!("While watching {}: {e}", path.display()),
                         ErrorKind::PathNotFound | ErrorKind::WatchNotFound => unreachable!(),

@@ -120,7 +120,7 @@ impl CollectorController {
                 return false;
             }
             Err(e) if e.is_full() => {
-                log::error!("failed to start a collection cycle: {e:?} (this is very bad)")
+                log::error!("failed to start a collection cycle: {e:?} (this is very bad)");
             }
             _ => {}
         }
@@ -149,7 +149,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
             sender,
             stop: Arc::default(),
         })) {
-            Ok(_) => (),
+            Ok(()) => (),
             Err(e) if e.is_full() => unreachable!("this channel can't be full"),
             Err(e) => {
                 log::debug!("stopping the collector: {e:?}");
@@ -227,14 +227,14 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                         }
                     }
                 }
-            })
+            });
         });
     })
 }
 
 fn handle_send_result(res: Result<(), SendError>) -> bool {
     match res {
-        Ok(_) => false,
+        Ok(()) => false,
         Err(e) if e.is_full() => {
             log::debug!("Error: Frontend is not responding: {e:?}");
             false

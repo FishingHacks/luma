@@ -23,13 +23,13 @@ impl Plugin for DicePlugin {
         let mut total = 0;
         for entry in words.iter().map(|v| v as &str).filter_map(roll) {
             entries.push(entry.0);
-            total += entry.1
+            total += entry.1;
         }
         if entries.len() > 1 {
             entries.insert(
                 0,
                 Entry::new(
-                    format!("Overall Total:  {}", total),
+                    format!("Overall Total:  {total}"),
                     StringLike::Empty,
                     CustomData::new(total),
                 ),
@@ -68,9 +68,9 @@ fn roll(s: &str) -> Option<(Entry, usize)> {
         }
         subtitle.push(' ');
         result += res;
-        _ = write!(subtitle, "{}", res);
+        _ = write!(subtitle, "{res}");
     }
 
-    let name = format!("Rolled {}d{} - Total: {}", dice, sides, result);
+    let name = format!("Rolled {dice}d{sides} - Total: {result}");
     Some((Entry::new(name, subtitle, CustomData::new(result)), result))
 }

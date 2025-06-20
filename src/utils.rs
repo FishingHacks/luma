@@ -1,6 +1,6 @@
 use std::{
     ffi::OsStr,
-    ops::Deref,
+    iter::Iterator,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, LazyLock, RwLock},
@@ -37,7 +37,7 @@ pub static EXECUTABLE_PATHS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
     std::env::var_os("PATH")
         .as_deref()
         .map(std::env::split_paths)
-        .map(|v| v.collect())
+        .map(Iterator::collect)
         .unwrap_or_default()
 });
 
@@ -80,12 +80,6 @@ pub fn run_cmd(mut cmd: Command) {
     }
 }
 
-pub fn run(cmd: impl AsRef<OsStr>, args: impl IntoIterator<Item = impl AsRef<OsStr>>) {
-    let mut cmd = Command::new(cmd);
-    cmd.args(args);
-    run_cmd(cmd)
-}
-
 pub fn locate_desktop_file(name: impl AsRef<Path> + Copy) -> Option<PathBuf> {
     APPLICATION_DIRS
         .iter()
@@ -93,8 +87,8 @@ pub fn locate_desktop_file(name: impl AsRef<Path> + Copy) -> Option<PathBuf> {
         .find(|v| v.exists() && v.is_file())
 }
 
-pub fn run_in_terminal(cmd: Command) {
-    if let Some(terminal) = TERMINAL.deref() {
+pub fn run_in_terminal(cmd: &Command) {
+    if let Some(terminal) = &*TERMINAL {
         let mut command = Command::new(terminal);
         command
             .arg("-e")
@@ -139,7 +133,7 @@ pub fn open_file(file: impl Into<Arc<Path>>) {
         };
         let output = output.lines().next().unwrap_or_default();
         with_desktop_file_info(Path::new(output), |desktop_file| {
-            run_desktop_file(desktop_file, &file)
+            run_desktop_file(desktop_file, &file);
         });
     });
 }
@@ -158,7 +152,7 @@ pub fn run_desktop_file(file: &DesktopFile, path: &Path) {
         cmd.current_dir(Path::new(&**cwd));
     }
     if file.terminal {
-        run_in_terminal(cmd);
+        run_in_terminal(&cmd);
     } else {
         run_cmd(cmd);
     }
@@ -190,9 +184,6 @@ pub fn with_desktop_file_info<R>(
 }
 
 pub struct DesktopFile {
-    name: Arc<str>,
-    description: Arc<str>,
-    hidden: bool,
     exec: Arc<str>,
     cwd: Option<Arc<str>>,
     terminal: bool,
@@ -206,13 +197,6 @@ impl TryFrom<freedesktop_file_parser::DesktopFile> for DesktopFile {
             return Err(());
         };
         Ok(Self {
-            name: value.entry.name.get_variant("").into(),
-            description: value
-                .entry
-                .comment
-                .map(|v| Arc::<_>::from(v.get_variant("")))
-                .unwrap_or_default(),
-            hidden: value.entry.no_display.unwrap_or(false) || value.entry.hidden.unwrap_or(false),
             exec: match (app.exec, app.try_exec) {
                 (Some(v), _) | (None, Some(v)) => v.into(),
                 (None, None) => return Err(()),

@@ -111,7 +111,7 @@ impl Log for Logger {
                 };
                 if path.starts_with(CRATE_NAME) {
                     let mut cmd = Command::new("notify-send");
-                    cmd.arg(format!("{}", fmt));
+                    cmd.arg(format!("{fmt}"));
                     utils::run_cmd(cmd);
                 }
             }
