@@ -48,4 +48,9 @@ impl<K: Hash + Eq, V, E, F: FnMut(K) -> Result<(K, V), E>> Cache<K, V, E, F> {
         let (k, v) = (self.fetcher)(key)?;
         Ok(Some(&self.inner.entry(k).or_insert((v, Instant::now())).0))
     }
+
+    pub fn clean(&mut self) {
+        self.inner
+            .retain(|_, v| Instant::now().duration_since(v.1) < self.expires_after);
+    }
 }

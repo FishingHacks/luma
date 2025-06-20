@@ -14,8 +14,8 @@ use std::{
 
 use config::{BlurAction, Config, FileWatcherEntry, Files, ScanFilter};
 use control_plugin::ControlPlugin;
-use convert_plugin::ConvertPlugin;
 use dice_plugin::DicePlugin;
+use fend_plugin::FendPlugin;
 use file_index::{FileIndexMessage, FileIndexResponse};
 use file_plugin::FilePlugin;
 use filter_service::{CollectorController, CollectorMessage, ResultBuilderRef};
@@ -44,8 +44,8 @@ use theme_plugin::ThemePlugin;
 mod cache;
 mod config;
 mod control_plugin;
-mod convert_plugin;
 mod dice_plugin;
+mod fend_plugin;
 mod file_index;
 mod file_plugin;
 mod filter_service;
@@ -352,7 +352,7 @@ impl Action {
     /// Constructs the suggest action (tab)
     #[must_use]
     pub const fn suggest(name: &'static str, id: &'static str) -> Self {
-        Self::new(name, id, (Modifiers::empty(), Key::Named(Named::Tab)))
+        Self::new(name, id, (Modifiers::empty(), Key::Named(Named::Tab))).keep_open()
     }
 
     /// Constructs the default action. This should always be the first entry.
@@ -976,8 +976,8 @@ fn main() -> iced::Result {
             };
             state.add_plugin::<ControlPlugin>();
             state.add_plugin::<ThemePlugin>();
-            state.add_plugin::<ConvertPlugin>();
             state.add_plugin::<DicePlugin>();
+            state.add_plugin::<FendPlugin>();
             state.add_plugin::<RunPlugin>();
             state.add_lua_plugins();
             state.add_plugin::<FilePlugin>();
