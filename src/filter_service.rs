@@ -57,6 +57,10 @@ impl<'a> ResultBuilderRef<'a> {
             }))
             .await
     }
+
+    pub fn should_stop(&self) -> bool {
+        self.builder.should_stop()
+    }
 }
 
 #[derive(Default)]
@@ -83,6 +87,10 @@ impl ResultBuilder {
 
     pub fn to_inner(self) -> Vec<GenericEntry> {
         self.results.into_inner()
+    }
+
+    pub fn should_stop(&self) -> bool {
+        self.should_stop.load(Ordering::Relaxed)
     }
 
     pub fn get_should_stop(&self) -> Arc<AtomicBool> {

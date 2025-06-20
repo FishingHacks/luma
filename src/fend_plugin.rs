@@ -1,6 +1,6 @@
 use std::sync::{Arc, RwLock};
 
-use fend_core::Context;
+use fend_core::{Context, Interrupt};
 use iced::{Task, clipboard};
 
 use crate::{
@@ -10,6 +10,14 @@ use crate::{
 
 #[derive(Default)]
 pub struct FendPlugin(RwLock<Context>);
+
+// TODO: currency handler
+
+impl Interrupt for ResultBuilderRef<'_> {
+    fn should_interrupt(&self) -> bool {
+        self.should_stop()
+    }
+}
 
 impl Plugin for FendPlugin {
     fn actions(&self) -> &[Action] {
@@ -32,7 +40,9 @@ impl Plugin for FendPlugin {
             let Ok(mut writer) = self.0.write() else {
                 return;
             };
-            let Ok(result) = fend_core::evaluate(input.input(), &mut writer) else {
+            let Ok(result) =
+                fend_core::evaluate_with_interrupt(input.input(), &mut writer, &builder)
+            else {
                 return;
             };
             drop(writer);
