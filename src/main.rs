@@ -26,7 +26,7 @@ use global_hotkey::{
 use iced::{
     Color, Element, Length, Point, Size, Subscription, Task, Theme,
     alignment::{Horizontal, Vertical},
-    futures::{SinkExt, future::BoxFuture},
+    futures::{SinkExt, channel::mpsc::Sender, future::BoxFuture},
     keyboard::{Key, Modifiers, key::Named},
     mouse::ScrollDelta,
     stream::channel,
@@ -952,34 +952,8 @@ fn main() -> iced::Result {
         .register(HOTKEY)
         .expect("failed to register the hotkey");
 
-    iced::daemon("spotlight", daemon_update, daemon_view)
-        .theme(|s, _| s.theme.clone())
-        .subscription(|_| {
-            Subscription::batch([
-                window::events().map(|ev| match ev.1 {
-                    window::Event::Unfocused => Message::Blurred,
-                    window::Event::Closed => Message::Hide(ev.0),
-                    _ => Message::None,
-                }),
-                hotkey_sub().map(|ev| {
-                    if ev.state() == HotKeyState::Pressed && ev.id == HOTKEY.id {
-                        Message::Show
-                    } else {
-                        Message::None
-                    }
-                }),
-                Subscription::run(file_index::file_index_service).map(Message::IndexerMessage),
-                Subscription::run(filter_service::collector).map(Message::CollectorMessage),
-                Subscription::run(|| {
-                    channel(100, |mut sender| async move {
-                        logging::register_message_sender(move |message| {
-                            _ = sender.try_send(message);
-                        });
-                    })
-                }),
-            ])
-        })
-        .run_with(move || {
+    iced::daemon(
+        move || {
             let text_input_id = text_input::Id::unique();
             let mut state = State {
                 search_query: String::new(),
@@ -998,7 +972,7 @@ fn main() -> iced::Result {
                 selected_action: 0,
                 on_blur: BlurAction::Refocus,
                 special_windows: BTreeMap::new(),
-                lua,
+                lua: lua.clone(),
             };
             state.add_plugin::<ControlPlugin>();
             state.add_plugin::<ThemePlugin>();
@@ -1008,14 +982,44 @@ fn main() -> iced::Result {
             state.add_lua_plugins();
             state.add_plugin::<FilePlugin>();
             (state, text_input::focus(text_input_id))
-        })?;
+        },
+        daemon_update,
+        daemon_view,
+    )
+    .theme(|s, _| s.theme.clone())
+    .subscription(|_| {
+        Subscription::batch([
+            window::events().map(|ev| match ev.1 {
+                window::Event::Unfocused => Message::Blurred,
+                window::Event::Closed => Message::Hide(ev.0),
+                _ => Message::None,
+            }),
+            hotkey_sub().map(|ev| {
+                if ev.state() == HotKeyState::Pressed && ev.id == HOTKEY.id {
+                    Message::Show
+                } else {
+                    Message::None
+                }
+            }),
+            Subscription::run(file_index::file_index_service).map(Message::IndexerMessage),
+            Subscription::run(filter_service::collector).map(Message::CollectorMessage),
+            Subscription::run(|| {
+                channel(100, |mut sender: Sender<_>| async move {
+                    logging::register_message_sender(move |message| {
+                        _ = sender.try_send(message);
+                    });
+                })
+            }),
+        ])
+    })
+    .run()?;
     drop(manager);
     Ok(())
 }
 
 fn hotkey_sub() -> Subscription<GlobalHotKeyEvent> {
     Subscription::run(|| {
-        channel(32, |mut sender| async move {
+        channel(32, |mut sender: Sender<_>| async move {
             let receiver = GlobalHotKeyEvent::receiver();
             loop {
                 if let Ok(event) = receiver.try_recv() {

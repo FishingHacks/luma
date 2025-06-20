@@ -39,7 +39,7 @@ pub enum FileIndexResponse {
 }
 
 pub fn file_index_service() -> impl Stream<Item = FileIndexResponse> {
-    iced::stream::channel(100, |mut output| async move {
+    iced::stream::channel(100, |mut output: mpsc::Sender<_>| async move {
         let (sender, mut receiver) = channel::unbounded();
         let (event_sender, mut event_receiver) = channel::unbounded();
         let file_index = load_fileindex(move |ev| {

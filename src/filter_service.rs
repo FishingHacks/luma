@@ -143,7 +143,7 @@ impl CollectorController {
 }
 
 pub fn collector() -> impl Stream<Item = CollectorMessage> {
-    channel(32, |mut output| async move {
+    channel(32, |mut output: mpsc::Sender<_>| async move {
         let (sender, mut receiver) = mpsc::channel(20);
         match output.try_send(CollectorMessage::Ready(CollectorController {
             sender,

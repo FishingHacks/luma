@@ -38,6 +38,7 @@ pub fn init() {
         .filter_module("naga", LevelFilter::Info)
         .filter_module("cosmic_text", LevelFilter::Info)
         .filter_module("iced_winit", LevelFilter::Warn)
+        .filter_module("iced_wgpu", LevelFilter::Warn)
         .parse_default_env()
         .build();
     let file = OpenOptions::new()
@@ -52,6 +53,7 @@ pub fn init() {
         .filter_module("naga", LevelFilter::Info)
         .filter_module("cosmic_text", LevelFilter::Info)
         .filter_module("iced_winit", LevelFilter::Warn)
+        .filter_module("iced_wgpu", LevelFilter::Warn)
         .target(Target::Pipe(Box::new(file)))
         .parse_default_env()
         .write_style(WriteStyle::Never)

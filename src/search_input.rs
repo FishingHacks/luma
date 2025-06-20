@@ -2,7 +2,6 @@ use iced::{
     Border, Element, Event, Rectangle, Renderer, Theme,
     advanced::{
         Clipboard, Layout, Shell, Widget,
-        graphics::core::event::Status,
         mouse::{Cursor, Interaction},
         widget::{Operation, Tree},
     },
@@ -87,17 +86,17 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
         self.0.operate(state, layout, renderer, operation);
     }
 
-    fn on_event(
+    fn update(
         &mut self,
         state: &mut Tree,
-        event: Event,
+        event: &Event,
         layout: Layout<'_>,
         cursor: Cursor,
         renderer: &Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
-    ) -> Status {
+    ) {
         let handled = 'blk: {
             match event {
                 Event::Keyboard(keyboard::Event::KeyReleased {
@@ -106,11 +105,7 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
                 }) => {
                     shell.publish(Message::HideActions);
                 }
-                Event::Keyboard(keyboard::Event::KeyPressed {
-                    ref key,
-                    ref modifiers,
-                    ..
-                }) => {
+                Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                     let is_ctrl = *modifiers == Modifiers::CTRL;
                     let is_ctrl_shift = *modifiers == Modifiers::CTRL.union(Modifiers::SHIFT);
                     match key {
@@ -157,11 +152,12 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
             true
         };
         if handled {
-            return Status::Captured;
+            shell.capture_event();
+            return;
         }
-        self.0.on_event(
+        self.0.update(
             state, event, layout, cursor, renderer, clipboard, shell, viewport,
-        )
+        );
     }
 
     fn mouse_interaction(
