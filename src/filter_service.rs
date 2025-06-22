@@ -1,6 +1,6 @@
 use std::{
     cmp,
-    pin::pin,
+    pin::{Pin, pin},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -18,7 +18,7 @@ use iced::{
     futures::{Stream, StreamExt},
     stream::channel,
 };
-use smol::{Timer, future::FutureExt, lock::RwLock};
+use tokio::sync::RwLock;
 
 use crate::{AnyPlugin, Entry, GenericEntry, matcher::MatcherInput};
 
@@ -167,7 +167,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
         }
 
         std::thread::spawn(move || {
-            smol::future::block_on(async {
+            iced::futures::executor::block_on(async {
                 loop {
                     let (plugins, mut query, should_stop) = match StreamExt::next(&mut receiver)
                         .await
@@ -217,14 +217,16 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                             break;
                         }
                         let next_msg = pin!(next_message_fn());
-                        let res =
-                            Joinall(futures, Timer::after(Duration::from_millis(200)), next_msg)
-                                .await;
+                        // https://preview.redd.it/7nv2i903ezba1.png?width=320&crop=smart&auto=webp&s=8c198937d80657b642b857b9a49346f48f49a0d9
+                        let the_eeper = pin!(crate::spawn(async {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }));
+                        let res = Joinall(futures, the_eeper, next_msg).await;
                         match res {
                             JoinAllResult::Abort => break,
                             JoinAllResult::Done(moved_futures) => futures = moved_futures,
                         }
-                        let mut writer = result_builder.to_inner().write_blocking();
+                        let mut writer = result_builder.to_inner().blocking_write();
                         if writer.len() == sent_previously {
                             continue;
                         }
@@ -273,14 +275,14 @@ fn handle_send_result(res: Result<(), SendError>) -> bool {
     }
 }
 
-struct Joinall<'a, F: Future<Output = ()>>(Vec<BoxFuture<'a, ()>>, Timer, F);
+struct Joinall<'a, 'b, Eeper: Future, F: Future>(Vec<BoxFuture<'a, ()>>, Pin<&'b mut Eeper>, F);
 
 enum JoinAllResult<'a> {
     Done(Vec<BoxFuture<'a, ()>>),
     Abort,
 }
 
-impl<'a, F: Future<Output = ()> + Unpin> Future for Joinall<'a, F> {
+impl<'a, Eeper: Future, F: Future + Unpin> Future for Joinall<'a, '_, Eeper, F> {
     type Output = JoinAllResult<'a>;
 
     fn poll(
@@ -288,10 +290,10 @@ impl<'a, F: Future<Output = ()> + Unpin> Future for Joinall<'a, F> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         self.0
-            .retain_mut(|fut| matches!(fut.poll(cx), Poll::Pending));
-        if self.0.is_empty() || self.1.poll(cx).is_ready() {
+            .retain_mut(|fut| matches!(fut.as_mut().poll(cx), Poll::Pending));
+        if self.0.is_empty() || self.1.as_mut().poll(cx).is_ready() {
             Poll::Ready(JoinAllResult::Done(std::mem::take(&mut self.0)))
-        } else if self.2.poll(cx).is_ready() {
+        } else if pin!(&mut self.2).poll(cx).is_ready() {
             return Poll::Ready(JoinAllResult::Abort);
         } else {
             Poll::Pending

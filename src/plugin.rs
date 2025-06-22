@@ -1,9 +1,18 @@
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
+use std::hash::{Hash, Hasher};
 use std::ops::{Bound, Deref, Range, RangeBounds};
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Clone, Debug)]
+use iced::Task;
+use iced::futures::future::BoxFuture;
+use rusqlite::ToSql;
+
+use crate::filter_service::ResultBuilderRef;
+use crate::matcher::MatcherInput;
+use crate::{Action, Message, ResultBuilder};
+
+#[derive(Clone, Debug, Eq)]
 pub enum StringLike {
     Static(&'static str),
     StaticPath(&'static Path),
@@ -11,6 +20,18 @@ pub enum StringLike {
     SharedStr(Arc<str>, Range<u16>),
     SharedPath(Arc<Path>, Range<u16>),
     Empty,
+}
+
+impl ToSql for StringLike {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        self.to_str().to_sql()
+    }
+}
+
+impl Hash for StringLike {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.to_str().hash(state);
+    }
 }
 
 impl PartialEq for StringLike {
@@ -199,5 +220,191 @@ where
             None => Self::Empty,
             Some(v) => Self::from(v),
         }
+    }
+}
+
+pub trait CustomDataCompatible: std::any::Any + Send + Sync + 'static {
+    fn clone_custom_data(&self) -> Box<dyn CustomDataCompatible>;
+}
+impl<T: std::any::Any + Clone + Send + Sync> CustomDataCompatible for T {
+    fn clone_custom_data(&self) -> Box<dyn CustomDataCompatible> {
+        Box::new(self.clone())
+    }
+}
+
+pub trait Plugin: Send + Sync {
+    fn actions(&self) -> &[Action] {
+        const { &[Action::default("Default Action", "")] }
+    }
+    fn prefix(&self) -> &str;
+    fn get_for_values_arc(
+        &self,
+        input: Arc<MatcherInput>,
+        builder: ResultBuilderRef<'_>,
+    ) -> impl std::future::Future<Output = ()> + std::marker::Send {
+        async move { self.get_for_values(&input, builder).await }
+    }
+    fn get_for_values(
+        &self,
+        input: &MatcherInput,
+        builder: ResultBuilderRef<'_>,
+    ) -> impl std::future::Future<Output = ()> + std::marker::Send;
+    fn init(&mut self);
+    #[allow(unused_variables)]
+    fn handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
+        Task::none()
+    }
+    #[allow(unused_variables)]
+    fn handle_post(&self, thing: CustomData, action: &str) -> Task<Message> {
+        Task::none()
+    }
+}
+
+pub struct Entry {
+    pub name: StringLike,
+    pub subtitle: StringLike,
+    pub perfect_match: bool,
+    pub data: CustomData,
+}
+impl Entry {
+    pub fn new(
+        name: impl Into<StringLike>,
+        subtitle: impl Into<StringLike>,
+        data: CustomData,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            subtitle: subtitle.into(),
+            data,
+            perfect_match: false,
+        }
+    }
+
+    /// this function pins this entry to the top of the list.
+    ///
+    /// Effectively this is the same as [`Entry::perfect`] called with true
+    #[must_use]
+    pub fn pin(mut self) -> Self {
+        // this effectively pins it to the top
+        self.perfect_match = true;
+        self
+    }
+    #[must_use]
+    pub fn perfect(mut self, perfect: bool) -> Self {
+        self.perfect_match = perfect;
+        self
+    }
+}
+
+pub trait AnyPlugin: Send + Sync {
+    fn as_any_ref(&self) -> &dyn std::any::Any;
+    fn any_actions(&self) -> &[Action];
+    fn any_prefix(&self) -> &str;
+    fn any_get_for_values<'future>(
+        &'future self,
+        input: Arc<MatcherInput>,
+        builder: &'future ResultBuilder,
+        plugin_id: usize,
+    ) -> BoxFuture<'future, ()>;
+    fn any_init(&mut self);
+    fn any_handle_pre(&self, thing: CustomData, action: &str) -> Task<Message>;
+    fn any_handle_post(&self, thing: CustomData, action: &str) -> Task<Message>;
+}
+impl<T: Plugin + 'static> AnyPlugin for T {
+    fn as_any_ref(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn any_actions(&self) -> &[Action] {
+        self.actions()
+    }
+
+    fn any_prefix(&self) -> &str {
+        self.prefix()
+    }
+
+    fn any_get_for_values<'fut>(
+        &'fut self,
+        input: Arc<MatcherInput>,
+        builder: &'fut ResultBuilder,
+        plugin_id: usize,
+    ) -> BoxFuture<'fut, ()> {
+        let builder = ResultBuilderRef::create(plugin_id, builder);
+        Box::pin(self.get_for_values_arc(input, builder))
+    }
+
+    fn any_init(&mut self) {
+        self.init();
+    }
+
+    fn any_handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
+        self.handle_pre(thing, action)
+    }
+    fn any_handle_post(&self, thing: CustomData, action: &str) -> Task<Message> {
+        self.handle_post(thing, action)
+    }
+}
+
+impl Debug for CustomData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<custom user data>")
+    }
+}
+
+impl Clone for Box<dyn CustomDataCompatible> {
+    fn clone(&self) -> Self {
+        (**self).clone_custom_data()
+    }
+}
+
+#[derive(Clone)]
+pub struct CustomData(Box<dyn CustomDataCompatible>);
+
+impl CustomData {
+    pub fn new<T: CustomDataCompatible>(value: T) -> Self {
+        Self(Box::new(value))
+    }
+
+    /// # Panics
+    ///
+    /// Panics when T is not the same value as the one stored in this [`CustomData`]
+    #[must_use]
+    pub fn into<T: CustomDataCompatible>(self) -> T {
+        *(self.0 as Box<dyn std::any::Any>)
+            .downcast()
+            .expect("this should never fail")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GenericEntry {
+    pub(crate) name: StringLike,
+    pub(crate) subtitle: StringLike,
+    /// the plugin index into the state
+    pub(crate) plugin: usize,
+    pub(crate) data: CustomData,
+    pub(crate) perfect_match: bool,
+}
+
+impl GenericEntry {
+    pub fn new(
+        name: impl Into<StringLike>,
+        subtitle: impl Into<StringLike>,
+        plugin: usize,
+        data: CustomData,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            subtitle: subtitle.into(),
+            plugin,
+            data,
+            perfect_match: false,
+        }
+    }
+
+    #[must_use]
+    pub fn perfect(mut self, perfect: bool) -> Self {
+        self.perfect_match = perfect;
+        self
     }
 }

@@ -2,8 +2,16 @@ use std::{
     borrow::Borrow,
     collections::HashMap,
     hash::Hash,
-    time::{Duration, Instant},
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
 };
+
+use tokio::sync::{
+    RwLock,
+    mpsc::{Sender, channel},
+};
+
+use crate::plugin::StringLike;
 
 pub struct Cache<K: Hash + Eq, V, E, F: FnMut(K) -> Result<(K, V), E>> {
     inner: HashMap<K, (V, Instant)>,
@@ -53,4 +61,189 @@ impl<K: Hash + Eq, V, E, F: FnMut(K) -> Result<(K, V), E>> Cache<K, V, E, F> {
         self.inner
             .retain(|_, v| Instant::now().duration_since(v.1) < self.expires_after);
     }
+}
+
+pub struct HTTPResponse {
+    pub result_code: u16,
+    pub body: Vec<u8>,
+    pub err: String,
+    pub ttl: SystemTime,
+}
+
+pub struct HTTPCache {
+    default_ttl: Duration,
+    in_memory_cache_ttl: Duration,
+    in_memory_cache: RwLock<HashMap<String, Arc<HTTPResponse>>>,
+    waiting: RwLock<HashMap<String, Vec<Sender<Arc<HTTPResponse>>>>>,
+    client: reqwest::Client,
+}
+
+impl HTTPCache {
+    pub async fn init(&self) -> rusqlite::Result<()> {
+        crate::sqlite::await_execute("CREATE TABLE get_request_cache(url TEXT, ttl INTEGER, body BLOB, err TEXT, result_code INTEGER)", [].into()).await?;
+        Ok(())
+    }
+    pub async fn get(
+        &self,
+        url: impl Into<StringLike>,
+        timeout: Option<Duration>,
+        ttl: Option<Duration>,
+    ) -> Arc<HTTPResponse> {
+        let url = url.into();
+        if let Some(v) = self.waiting.write().await.get_mut(url.to_str()) {
+            let (sender, mut receiver) = channel(1);
+            v.push(sender);
+            return receiver
+                .recv()
+                .await
+                .expect("failed to receive...... this is bad");
+        }
+        let mut in_memory_cache = self.in_memory_cache.write().await;
+        if let Some(v) = in_memory_cache.get(url.to_str()) {
+            if v.ttl >= SystemTime::now() {
+                log::debug!("returning {url} from local cache");
+                return v.clone();
+            }
+            in_memory_cache.remove(url.to_str());
+        }
+        drop(in_memory_cache);
+        let params1 = Box::new([Box::new(url.clone()) as Box<_>]);
+        let params = Box::new([Box::new(url.clone()) as Box<_>]);
+        if let Ok(v) = crate::sqlite::await_query(
+            "SELECT * FROM get_request_cache WHERE url = ?1",
+            params1,
+            move |row| {
+                let ttl = row.get("ttl")?;
+                let ttl = SystemTime::UNIX_EPOCH + Duration::from_secs(ttl);
+                if ttl < SystemTime::now() {
+                    log::debug!("database entry is to old :<");
+                    crate::sqlite::execute("DELETE FROM get_request_cache WHERE url = ?1", params);
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+                Ok(HTTPResponse {
+                    result_code: row.get("result_code")?,
+                    body: row.get("body")?,
+                    err: row.get("err")?,
+                    ttl,
+                })
+            },
+        )
+        .await
+        {
+            let arc = Arc::new(v);
+            self.in_memory_cache
+                .write()
+                .await
+                .insert(url.to_string(), arc.clone());
+            log::debug!("returning {url} from db cache");
+            return arc;
+        }
+        let (sender, mut receiver) = channel(1);
+        self.waiting
+            .write()
+            .await
+            .insert(url.to_string(), vec![sender]);
+        crate::spawn(async move {
+            log::debug!("fetching {url}");
+            let me = &*crate::utils::HTTP_CACHE;
+            let res = me.run_request(&url, timeout, ttl).await;
+            let res = Arc::new(res);
+            me.in_memory_cache
+                .write()
+                .await
+                .insert(url.to_string(), res.clone());
+            if let Some(v) = me.waiting.write().await.remove(url.to_str()) {
+                for v in &v {
+                    _ = v.try_send(res.clone());
+                }
+            }
+            crate::sqlite::execute(
+                "INSERT INTO get_request_cache (url, result_code, body, err, ttl) values (?1, ?2, ?3, ?4, ?5)",
+                [
+                    Box::new(url) as Box<_>,
+                    Box::new(res.result_code) as Box<_>,
+                    Box::new(res.body.clone()) as Box<_>,
+                    Box::new(res.err.clone()) as Box<_>,
+                    Box::new(
+                        res.ttl
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .expect("time went backwards")
+                            .as_secs(),
+                    ) as Box<_>,
+                ]
+                .into(),
+            );
+        });
+        receiver
+            .recv()
+            .await
+            .expect("failed to receive...... this is bad")
+    }
+    async fn run_request(
+        &self,
+        url: &str,
+        timeout: Option<Duration>,
+        ttl: Option<Duration>,
+    ) -> HTTPResponse {
+        let res = match self
+            .client
+            .get(url)
+            .timeout(timeout.unwrap_or(Duration::from_secs(30)))
+            .send()
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return HTTPResponse {
+                    result_code: 0,
+                    body: Vec::new(),
+                    err: format!("{e}"),
+                    ttl: SystemTime::now() + ttl.unwrap_or(self.default_ttl),
+                };
+            }
+        };
+        let result_code = res.status().as_u16();
+        let body = match res.bytes().await {
+            Ok(v) => v,
+            Err(e) => {
+                return HTTPResponse {
+                    result_code: 0,
+                    body: Vec::new(),
+                    err: format!("{e}"),
+                    ttl: SystemTime::now() + ttl.unwrap_or(self.default_ttl),
+                };
+            }
+        };
+        HTTPResponse {
+            result_code,
+            body: body.into(),
+            err: String::new(),
+            ttl: SystemTime::now() + ttl.unwrap_or(self.default_ttl),
+        }
+    }
+
+    pub fn new() -> Self {
+        HTTPCache {
+            default_ttl: Duration::from_secs(60 * 10),
+            in_memory_cache_ttl: Duration::from_secs(120),
+            in_memory_cache: RwLock::default(),
+            client: reqwest::Client::new(),
+            waiting: <_>::default(),
+        }
+    }
+
+    pub async fn clean(&self) {
+        self.in_memory_cache
+            .write()
+            .await
+            .retain(|_, v| v.ttl >= SystemTime::now());
+    }
+}
+
+pub async fn clean_caches() {
+    crate::utils::DESKTOP_FILE_INFO_CACHE
+        .write()
+        .expect("desktop file cache is poisoned :<")
+        .clean();
+    crate::utils::HTTP_CACHE.clean().await;
 }

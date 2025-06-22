@@ -2,23 +2,24 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
     path::{Path, PathBuf},
-    pin,
+    pin::pin,
     sync::{Arc, LazyLock, OnceLock},
     task::Poll,
     time::{Duration, Instant, SystemTime},
 };
 
-use iced::futures::{FutureExt as _, SinkExt, Stream, channel::mpsc};
+use iced::futures::{
+    FutureExt as _, SinkExt, Stream,
+    channel::mpsc::{self},
+};
 use notify::{
     ErrorKind, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
     event::{CreateKind, RemoveKind},
 };
 use serde::{Deserialize, Serialize};
-use smol::{
-    channel::{self, Receiver, Sender, TryRecvError, TrySendError},
-    future::FutureExt as _,
-    lock::RwLock,
-    stream::StreamExt as _,
+use tokio::sync::{
+    RwLock,
+    mpsc::{UnboundedReceiver, UnboundedSender, error::TryRecvError, unbounded_channel},
 };
 
 use crate::{
@@ -34,133 +35,122 @@ pub enum FileIndexMessage {
 
 #[derive(Debug, Clone)]
 pub enum FileIndexResponse {
-    Starting(Sender<FileIndexMessage>),
+    Starting(UnboundedSender<FileIndexMessage>),
     IndexFinished,
 }
 
 pub fn file_index_service() -> impl Stream<Item = FileIndexResponse> {
-    iced::stream::channel(100, |mut output: mpsc::Sender<_>| async move {
-        let (sender, mut receiver) = channel::unbounded();
-        let (event_sender, mut event_receiver) = channel::unbounded();
-        let file_index = load_fileindex(move |ev| {
-            if let Ok(ev) = ev {
-                if !matches!(ev.kind, EventKind::Create(_) | EventKind::Remove(_)) {
-                    return;
-                }
-                match event_sender.try_send(ev) {
-                    Ok(()) => {}
-                    Err(TrySendError::Closed(_)) => log::error!(
-                        "the file indexing is stopped, but events are still received. this should never happen. you might want to restart the application and reindex directories you're watching."
-                    ),
-                    Err(TrySendError::Full(_)) => {
-                        log::error!("the unbounded event sender is full. This is pretty bad.");
+    iced::stream::channel(100, async |mut output: mpsc::Sender<_>| {
+        _ = crate::spawn(async move {
+            let (sender, mut receiver) = unbounded_channel();
+            let (event_sender, mut event_receiver) = unbounded_channel();
+            let file_index = load_fileindex(move |ev| {
+                if let Ok(ev) = ev {
+                    if !matches!(ev.kind, EventKind::Create(_) | EventKind::Remove(_)) {
+                        return;
+                    }
+                    match event_sender.send(ev) {
+                        Ok(()) => {}
+                        Err(_) => log::error!(
+                            "the file indexing is stopped, but events are still received. this should never happen. you might want to restart the application and reindex directories you're watching."
+                        ),
                     }
                 }
-            }
-        });
-        let Some(mut file_index) = file_index.await else {
-            log::debug!("Stopping file indexing");
-            return;
-        };
-        output
-            .send(FileIndexResponse::Starting(sender))
-            .await
-            .expect("the application exited but this is somehow still running");
-        let config = pin::pin!(receiver.clone())
-            .find_map(|v| match v {
-                FileIndexMessage::SetConfig(config) => Some(config),
-                FileIndexMessage::Reindex(_) => None,
-            })
-            .await;
-        let Some(config) = config else {
-            log::debug!("Stopping file indexing: main thread didn't send a config before quitting");
-            return;
-        };
-        let files = &config.files;
-        let mut queue = HashSet::new();
-        for entry in &files.entries {
-            if file_index.config.contains_key(&*entry.path) {
-                log::error!(
-                    "The config contains multiple entries for {}.\nPlease edit the config at {}",
-                    entry.path.display(),
-                    CONFIG_FILE.display()
-                );
+            });
+            let Some(mut file_index) = file_index.await else {
+                log::debug!("Stopping file indexing");
                 return;
+            };
+            output
+                .send(FileIndexResponse::Starting(sender))
+                .await
+                .expect("the application exited but this is somehow still running");
+            let config = loop {
+                match receiver.recv().await {
+                    Some(FileIndexMessage::SetConfig(config)) => break config,
+                    Some(FileIndexMessage::Reindex(_)) => {}
+                    None => {
+                        log::debug!(
+                            "Stopping file indexing: main thread didn't send a config before quitting"
+                        );
+                        return;
+                    }
+                }
+            };
+            let files = &config.files;
+            let mut queue = HashSet::new();
+            for entry in &files.entries {
+                if file_index.config.contains_key(&*entry.path) {
+                    log::error!(
+                        "The config contains multiple entries for {}.\nPlease edit the config at {}",
+                        entry.path.display(),
+                        CONFIG_FILE.display()
+                    );
+                    return;
+                }
+                let path = entry.path.clone();
+                if files.reindex_at_startup || !file_index.children.contains_key(&path) {
+                    queue.insert(path.clone());
+                }
+                file_index.config.insert(path.0, entry.clone());
             }
-            let path = entry.path.clone();
-            if files.reindex_at_startup || !file_index.children.contains_key(&path) {
-                queue.insert(path.clone());
-            }
-            file_index.config.insert(path.0, entry.clone());
-        }
 
-        std::thread::spawn(move || {
-            smol::block_on(async move {
-                let mut watcher = file_index.watcher.write().await;
-                log::debug!("Starting to watch directories...");
-                file_index
-                    .children
-                    .values_mut()
-                    .for_each(|v| v.start_watching(&mut watcher));
-                log::debug!("All directories are being watched...");
-                drop(watcher);
-                FILE_INDEX
-                    .set(Arc::new(file_index.into()))
-                    .ok()
-                    .expect("the file indexing service was started multiple times");
-                let mut prev_file_msg = None;
-                let mut prev_event = None;
-                loop {
-                    let res = main_loop(
-                        &mut receiver,
-                        &mut event_receiver,
-                        &mut output,
-                        &mut queue,
-                        prev_file_msg.take(),
-                        prev_event.take(),
-                    )
-                    .await;
-                    match res {
-                        MainLoopResult::Stop => break,
-                        MainLoopResult::Working => {}
-                        MainLoopResult::Idle => {
-                            let fut1 = receiver.recv().map(Ok);
-                            let fut2 = event_receiver.recv().map(Err);
-                            match fut1.or(fut2).await {
-                                Ok(Ok(v)) => prev_file_msg = Some(v),
-                                Err(Ok(v)) => prev_event = Some(v),
-                                _ => {}
+            std::thread::spawn(move || {
+                iced::futures::executor::block_on(async move {
+                    let mut watcher = file_index.watcher.write().await;
+                    log::debug!("Starting to watch directories...");
+                    file_index
+                        .children
+                        .values_mut()
+                        .for_each(|v| v.start_watching(&mut watcher));
+                    log::debug!("All directories are being watched...");
+                    drop(watcher);
+                    FILE_INDEX
+                        .set(Arc::new(file_index.into()))
+                        .ok()
+                        .expect("the file indexing service was started multiple times");
+                    let mut prev_file_msg = None;
+                    let mut prev_event = None;
+                    loop {
+                        let res = main_loop(
+                            &mut receiver,
+                            &mut event_receiver,
+                            &mut output,
+                            &mut queue,
+                            prev_file_msg.take(),
+                            prev_event.take(),
+                        )
+                        .await;
+                        match res {
+                            MainLoopResult::Stop => break,
+                            MainLoopResult::Working => {}
+                            MainLoopResult::Idle => {
+                                let fut1 = receiver.recv().map(Ok);
+                                let fut2 = event_receiver.recv().map(Err);
+                                let mut fut1 = pin!(fut1);
+                                let mut fut2 = pin!(fut2);
+                                let fut = std::future::poll_fn(|cx| {
+                                    if let Poll::Ready(v) = fut1.as_mut().poll(cx) {
+                                        return Poll::Ready(v);
+                                    }
+                                    if let Poll::Ready(v) = fut2.as_mut().poll(cx) {
+                                        return Poll::Ready(v);
+                                    }
+                                    Poll::Pending
+                                });
+                                match fut.await {
+                                    Ok(Some(v)) => prev_file_msg = Some(v),
+                                    Err(Some(v)) => prev_event = Some(v),
+                                    _ => {}
+                                }
                             }
                         }
                     }
-                }
-                log::debug!("Shutting down file indexer");
+                    log::debug!("Shutting down file indexer");
+                });
             });
-        });
+        }).await;
     })
-}
-
-struct MyFancyFuture<'a, F1, F2>(pin::Pin<&'a mut F1>, pin::Pin<&'a mut F2>);
-
-impl<T1, T2, F1, F2> Future for MyFancyFuture<'_, F1, F2>
-where
-    F1: Future<Output = T1>,
-    F2: Future<Output = T2>,
-{
-    type Output = Result<T1, T2>;
-
-    fn poll(
-        self: pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        let me = self.get_mut();
-        if let Poll::Ready(v) = me.0.as_mut().poll(cx) {
-            return Poll::Ready(Ok(v));
-        } else if let Poll::Ready(v) = me.1.as_mut().poll(cx) {
-            return Poll::Ready(Err(v));
-        }
-        Poll::Pending
-    }
 }
 
 enum MainLoopResult {
@@ -170,8 +160,8 @@ enum MainLoopResult {
 }
 
 async fn main_loop(
-    receiver: &mut Receiver<FileIndexMessage>,
-    event_receiver: &mut Receiver<notify::Event>,
+    receiver: &mut UnboundedReceiver<FileIndexMessage>,
+    event_receiver: &mut UnboundedReceiver<notify::Event>,
     output: &mut mpsc::Sender<FileIndexResponse>,
     queue: &mut HashSet<ArcPath>,
     mut prev_file_idx_msg: Option<FileIndexMessage>,
@@ -187,7 +177,7 @@ async fn main_loop(
             Ok(FileIndexMessage::Reindex(path)) => _ = queue.insert(ArcPath(path)),
             Ok(FileIndexMessage::SetConfig(_)) => todo!(),
             Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Closed) => return MainLoopResult::Stop,
+            Err(TryRecvError::Disconnected) => return MainLoopResult::Stop,
         }
     }
     let index = FILE_INDEX.get().expect("file index should be initialized");
@@ -223,22 +213,20 @@ async fn main_loop(
     if event_receiver.is_closed() && prev_event.is_none() {
         return result;
     }
-    if !event_receiver.is_full() {
+    if event_receiver.is_empty() {
         // wait 10 seconds and collect all events, so we don't get overwhelmed.
-        smol::Timer::after(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
     }
 
     let mut writer = index.write().await;
-    let mut watcher = writer.watcher.write_arc().await;
+    let mut watcher = writer.watcher.clone().write_owned().await;
     log::debug!("got watch events");
     while !event_receiver.is_empty() || prev_event.is_some() {
         let ev = match prev_event.take() {
             Some(e) => e,
             None => match event_receiver.recv().await {
-                Ok(ev) => ev,
-                // ignoring this is probably fine? or shouldn't happen at all because we already check
-                // if the stream is closed. this should probably have better error handling but ehh
-                Err(_) => break,
+                Some(ev) => ev,
+                None => break,
             },
         };
         if ev.need_rescan() {
@@ -307,7 +295,7 @@ pub static INDEX_FILE_DIR: LazyLock<PathBuf> =
 async fn load_fileindex(
     event_handler: impl Fn(Result<notify::Event, notify::Error>) + Send + 'static,
 ) -> Option<FileIndex> {
-    let children = if let Ok(data) = smol::fs::read_to_string(&*INDEX_FILE_DIR).await {
+    let children = if let Ok(data) = tokio::fs::read_to_string(&*INDEX_FILE_DIR).await {
         match toml::from_str(&data) {
             Ok(v) => v,
             Err(e) => {
@@ -347,11 +335,11 @@ async fn update_file_index(index: &RwLock<FileIndex>) -> bool {
     let parent = INDEX_FILE_DIR
         .parent()
         .expect("A file should always have a parent");
-    if let Err(e) = smol::fs::create_dir_all(parent).await {
+    if let Err(e) = tokio::fs::create_dir_all(parent).await {
         log::error!("Failed to create the path {}: {e:?}", parent.display());
         return false;
     }
-    if let Err(e) = smol::fs::write(&*INDEX_FILE_DIR, string).await {
+    if let Err(e) = tokio::fs::write(&*INDEX_FILE_DIR, string).await {
         log::error!("Failed to write the file index: {e:?}");
         return false;
     }
@@ -610,7 +598,7 @@ impl FileIndexer {
         if self.other_indexed_dirs.contains(&directory) {
             return true;
         }
-        let mut dirent = match smol::fs::read_dir(&directory).await {
+        let mut dirent = match tokio::fs::read_dir(&directory).await {
             Ok(v) => v,
             Err(e) => {
                 log::debug!("Failed to read {}: {e}", directory.display());
@@ -619,7 +607,7 @@ impl FileIndexer {
         };
         self.entries.insert(ArcPath(directory));
         loop {
-            let entry = dirent.try_next().await;
+            let entry = dirent.next_entry().await;
             let entry = match entry {
                 Ok(Some(entry)) => entry,
                 Ok(None) => break,

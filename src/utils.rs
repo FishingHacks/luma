@@ -9,9 +9,10 @@ use std::{
 
 use freedesktop_file_parser::EntryType;
 
-use crate::cache::Cache;
+use crate::cache::{Cache, HTTPCache};
 
 pub static CRATE_NAME: &str = env!("CARGO_PKG_NAME");
+pub static CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub static HOME_DIR: LazyLock<PathBuf> =
     LazyLock::new(|| std::env::home_dir().expect("no homedir was found!"));
 pub static APPLICATION_DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
@@ -109,6 +110,11 @@ pub fn run_in_terminal(cmd: &Command) {
     }
 }
 
+pub fn open_link(file: impl AsRef<OsStr>) {
+    let mut cmd = Command::new("xdg-open");
+    cmd.arg(file);
+    run_cmd(cmd);
+}
 pub fn open_file(file: impl Into<Arc<Path>>) {
     let file = file.into();
     let mut cmd = Command::new("xdg-mime");
@@ -210,7 +216,7 @@ impl TryFrom<freedesktop_file_parser::DesktopFile> for DesktopFile {
 type DesktopFileCache =
     Cache<Arc<Path>, DesktopFile, (), fn(Arc<Path>) -> Result<(Arc<Path>, DesktopFile), ()>>;
 
-static DESKTOP_FILE_INFO_CACHE: LazyLock<RwLock<DesktopFileCache>> = LazyLock::new(|| {
+pub static DESKTOP_FILE_INFO_CACHE: LazyLock<RwLock<DesktopFileCache>> = LazyLock::new(|| {
     RwLock::new(Cache::new(
         |file| {
             let Ok(result) = std::fs::read_to_string(&file) else {
@@ -251,3 +257,4 @@ pub static DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
 });
 
 pub static CONFIG_FILE: LazyLock<PathBuf> = LazyLock::new(|| CONFIG_DIR.join("config.toml"));
+pub static HTTP_CACHE: LazyLock<HTTPCache> = LazyLock::new(HTTPCache::new);

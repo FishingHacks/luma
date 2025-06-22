@@ -2,13 +2,14 @@
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::too_many_lines)]
+#![allow(clippy::unreadable_literal)]
 use std::{
     borrow::Cow,
     collections::BTreeMap,
     ffi::OsStr,
     fmt::Debug,
     path::Path,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, RwLock},
     time::Duration,
 };
 
@@ -24,18 +25,18 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers as HKModifiers},
 };
 use iced::{
-    Color, Element, Length, Point, Size, Subscription, Task, Theme,
+    Border, Color, Element, Length, Point, Size, Subscription, Task, Theme,
     alignment::{Horizontal, Vertical},
-    futures::{SinkExt, channel::mpsc::Sender, future::BoxFuture},
+    border::Radius,
+    color,
+    futures::{SinkExt, channel::mpsc::Sender},
     keyboard::{Key, Modifiers, key::Named},
     mouse::ScrollDelta,
     stream::channel,
     widget::{MouseArea, button, column, container, mouse_area, row, stack, text, text_input},
     window::{self, Level, Position, Settings},
 };
-use matcher::MatcherInput;
 use mlua::Lua;
-use plugin::StringLike;
 use run_plugin::RunPlugin;
 use search_input::SearchInput;
 use special_windows::SpecialWindowState;
@@ -57,9 +58,13 @@ mod plugin;
 mod run_plugin;
 mod search_input;
 mod special_windows;
+mod sqlite;
 mod theme_plugin;
 mod utils;
 pub use filter_service::ResultBuilder;
+use plugin::{AnyPlugin, GenericEntry};
+pub use plugin::{CustomData, Entry, Plugin};
+use tokio::sync::mpsc::UnboundedSender;
 
 pub static CONFIG: LazyLock<Arc<Config>> = LazyLock::new(|| {
     Config {
@@ -73,149 +78,11 @@ pub static CONFIG: LazyLock<Arc<Config>> = LazyLock::new(|| {
             reindex_at_startup: false,
         },
         on_blur: BlurAction::Refocus,
+        keybind: "Alt+P".into(),
+        enabled_plugins: vec![],
     }
     .into()
 });
-
-pub trait CustomDataCompatible: std::any::Any + Send + Sync + 'static {
-    fn clone_custom_data(&self) -> Box<dyn CustomDataCompatible>;
-}
-impl<T: std::any::Any + Clone + Send + Sync> CustomDataCompatible for T {
-    fn clone_custom_data(&self) -> Box<dyn CustomDataCompatible> {
-        Box::new(self.clone())
-    }
-}
-
-pub trait AsCustomData {
-    fn from_custom_data(custom_data: CustomData) -> Self;
-    #[must_use]
-    fn to_custom_data(&self) -> Self;
-}
-
-pub trait Plugin: Send + Sync {
-    fn actions(&self) -> &[Action] {
-        const { &[Action::default("Default Action", "")] }
-    }
-    fn prefix(&self) -> &str;
-    fn get_for_values_arc(
-        &self,
-        input: Arc<MatcherInput>,
-        builder: ResultBuilderRef<'_>,
-    ) -> impl std::future::Future<Output = ()> + std::marker::Send {
-        async move { self.get_for_values(&input, builder).await }
-    }
-    fn get_for_values(
-        &self,
-        input: &MatcherInput,
-        builder: ResultBuilderRef<'_>,
-    ) -> impl std::future::Future<Output = ()> + std::marker::Send;
-    fn init(&mut self);
-    #[allow(unused_variables)]
-    fn handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
-        Task::none()
-    }
-    #[allow(unused_variables)]
-    fn handle_post(&self, thing: CustomData, action: &str) -> Task<Message> {
-        Task::none()
-    }
-}
-
-pub struct Entry {
-    name: StringLike,
-    subtitle: StringLike,
-    perfect_match: bool,
-    data: CustomData,
-}
-impl Entry {
-    pub fn new(
-        name: impl Into<StringLike>,
-        subtitle: impl Into<StringLike>,
-        data: CustomData,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            subtitle: subtitle.into(),
-            data,
-            perfect_match: false,
-        }
-    }
-
-    /// this function pins this entry to the top of the list.
-    ///
-    /// Effectively this is the same as [`Entry::perfect`] called with true
-    #[must_use]
-    pub fn pin(mut self) -> Self {
-        // this effectively pins it to the top
-        self.perfect_match = true;
-        self
-    }
-    #[must_use]
-    pub fn perfect(mut self, perfect: bool) -> Self {
-        self.perfect_match = perfect;
-        self
-    }
-}
-
-pub trait AnyPlugin: Send + Sync {
-    fn as_any_ref(&self) -> &dyn std::any::Any;
-    fn any_actions(&self) -> &[Action];
-    fn any_prefix(&self) -> &str;
-    fn any_get_for_values<'future>(
-        &'future self,
-        input: Arc<MatcherInput>,
-        builder: &'future ResultBuilder,
-        plugin_id: usize,
-    ) -> BoxFuture<'future, ()>;
-    fn any_init(&mut self);
-    fn any_handle_pre(&self, thing: CustomData, action: &str) -> Task<Message>;
-    fn any_handle_post(&self, thing: CustomData, action: &str) -> Task<Message>;
-}
-impl<T: Plugin + 'static> AnyPlugin for T {
-    fn as_any_ref(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn any_actions(&self) -> &[Action] {
-        self.actions()
-    }
-
-    fn any_prefix(&self) -> &str {
-        self.prefix()
-    }
-
-    fn any_get_for_values<'fut>(
-        &'fut self,
-        input: Arc<MatcherInput>,
-        builder: &'fut ResultBuilder,
-        plugin_id: usize,
-    ) -> BoxFuture<'fut, ()> {
-        let builder = ResultBuilderRef::create(plugin_id, builder);
-        Box::pin(self.get_for_values_arc(input, builder))
-    }
-
-    fn any_init(&mut self) {
-        self.init();
-    }
-
-    fn any_handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
-        self.handle_pre(thing, action)
-    }
-    fn any_handle_post(&self, thing: CustomData, action: &str) -> Task<Message> {
-        self.handle_post(thing, action)
-    }
-}
-
-impl Debug for CustomData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("<custom user data>")
-    }
-}
-
-impl Clone for Box<dyn CustomDataCompatible> {
-    fn clone(&self) -> Self {
-        (**self).clone_custom_data()
-    }
-}
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -249,58 +116,6 @@ pub enum Message {
     IndexerMessage(FileIndexResponse),
 }
 
-#[derive(Clone)]
-pub struct CustomData(Box<dyn CustomDataCompatible>);
-
-impl CustomData {
-    pub fn new<T: CustomDataCompatible>(value: T) -> Self {
-        Self(Box::new(value))
-    }
-
-    /// # Panics
-    ///
-    /// Panics when T is not the same value as the one stored in this [`CustomData`]
-    #[must_use]
-    pub fn into<T: CustomDataCompatible>(self) -> T {
-        *(self.0 as Box<dyn std::any::Any>)
-            .downcast()
-            .expect("this should never fail")
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GenericEntry {
-    name: StringLike,
-    subtitle: StringLike,
-    /// the plugin index into the state
-    plugin: usize,
-    data: CustomData,
-    perfect_match: bool,
-}
-
-impl GenericEntry {
-    pub fn new(
-        name: impl Into<StringLike>,
-        subtitle: impl Into<StringLike>,
-        plugin: usize,
-        data: CustomData,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            subtitle: subtitle.into(),
-            plugin,
-            data,
-            perfect_match: false,
-        }
-    }
-
-    #[must_use]
-    pub fn perfect(mut self, perfect: bool) -> Self {
-        self.perfect_match = perfect;
-        self
-    }
-}
-
 pub struct State {
     search_query: String,
     results: Vec<GenericEntry>,
@@ -312,7 +127,7 @@ pub struct State {
     plugins: Arc<Vec<Box<dyn AnyPlugin>>>,
     plugin_builder: Vec<Box<dyn FnMut() -> Box<dyn AnyPlugin>>>,
     theme: Theme,
-    index_sender: Option<smol::channel::Sender<FileIndexMessage>>,
+    index_sender: Option<UnboundedSender<FileIndexMessage>>,
     collector_controller: Option<CollectorController>,
     showing_actions: bool,
     selected_action: usize,
@@ -395,17 +210,19 @@ impl Action {
     }
 }
 
-pub fn action_format_key(key: &Key, modifiers: Modifiers, s: &mut String) {
+pub fn format_key(key: &Key, modifiers: Modifiers, s: &mut String) {
     use std::fmt::Write;
 
     if matches!(key, Key::Unidentified) {
         return;
     }
-    s.push_str("  ");
     if Modifiers::CTRL.intersects(modifiers) {
         s.push_str("Ctrl + ");
     }
     if Modifiers::ALT.intersects(modifiers) {
+        #[cfg(target_os = "macos")]
+        s.push_str("Alt + ");
+        #[cfg(not(target_os = "macos"))]
         s.push_str("Alt + ");
     }
     if Modifiers::LOGO.intersects(modifiers) {
@@ -417,11 +234,51 @@ pub fn action_format_key(key: &Key, modifiers: Modifiers, s: &mut String) {
         s.push_str("Super + ");
     }
     match key {
-        Key::Named(named) => {
-            write!(s, "{named:?}").expect("writing to a string should never fail!");
+        Key::Named(Named::Super) => {
+            #[cfg(target_os = "windows")]
+            s.push_str("Win");
+            #[cfg(target_os = "macos")]
+            s.push_str(" Cmd");
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            s.push_str("Super");
         }
+        Key::Named(Named::Enter) => s.push_str("↵  Enter"),
+        Key::Named(Named::Backspace) => s.push_str("← Backspace"),
+        Key::Named(named) => write!(s, "{named:?}").expect("write-to-str-fail"),
         Key::Character(c) => s.push_str(c.as_str()),
         Key::Unidentified => s.push_str("unknown key"),
+    }
+}
+
+#[must_use]
+pub fn key_element(s: Cow<'_, str>) -> Element<'_, Message> {
+    container(text(s).size(16))
+        .style(|theme| {
+            container::dark(theme)
+                .background(color!(0x44403b))
+                .border(Border {
+                    color: color!(0x292524),
+                    width: 1.5,
+                    radius: 7.0.into(),
+                })
+        })
+        .padding([0, 10])
+        .into()
+}
+
+fn button_style(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut style = if selected {
+            button::primary(theme, status)
+        } else {
+            button::text(theme, status)
+        };
+        style.border = Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: Radius::new(0.0),
+        };
+        style
     }
 }
 
@@ -486,23 +343,23 @@ impl State {
                 button(inner_col)
                     .width(Length::Fill)
                     .height(Length::Fixed(ENTRY_SIZE))
-                    .style(if selected {
-                        button::primary
-                    } else {
-                        button::text
-                    })
+                    .style(button_style(selected))
                     .on_press(Message::Click(entry_idx + self.offset)),
             );
         }
         if self.showing_actions {
             for (i, action) in self.get_actions().iter().enumerate() {
-                let mut s = String::new();
-                action_format_key(&action.shortcut.1, action.shortcut.0, &mut s);
-                let description = row![
-                    text(&action.name).size(16).style(text::default),
-                    text(s).color(Color::from_rgb8(0x60, 0x60, 0x60)),
-                ]
-                .spacing(10);
+                let description = if matches!(action.shortcut.1, Key::Unidentified) {
+                    row![text(&action.name).size(16).style(text::default)].spacing(10)
+                } else {
+                    let mut s = String::new();
+                    format_key(&action.shortcut.1, action.shortcut.0, &mut s);
+                    row![
+                        text(&action.name).size(16).style(text::default),
+                        key_element(s.into())
+                    ]
+                    .spacing(10)
+                };
                 col = col.push(
                     button(
                         container(description)
@@ -510,16 +367,51 @@ impl State {
                             .align_x(Horizontal::Center),
                     )
                     .width(Length::Fill)
-                    .style(if self.selected_action == i {
-                        button::primary
-                    } else {
-                        button::text
-                    })
-                    .height(Length::Fixed(ACTION_SIZE))
+                    .style(button_style(self.selected_action == i))
+                    .height(ACTION_SIZE)
                     .on_press(Message::None),
                 );
             }
         }
+
+        let (action_text, action_key, action_seperator) = match self
+            .results
+            .get(self.selected)
+            .and_then(|v| self.plugins.get(v.plugin))
+            .and_then(|v| v.any_actions().first())
+        {
+            None => (None, None, None),
+            Some(action) => {
+                let mut s = String::new();
+                format_key(&action.shortcut.1, action.shortcut.0, &mut s);
+                (
+                    Some(text(&action.name).size(16)),
+                    Some(key_element(s.into())),
+                    Some(text("•").size(16)),
+                )
+            }
+        };
+        col = col.push(
+            container(
+                row::Row::new()
+                    .push_maybe(action_text)
+                    .push_maybe(action_key)
+                    .push_maybe(action_seperator)
+                    .push(text("Actions").size(16))
+                    .push(key_element("Alt".into()))
+                    .push(text("•").size(16))
+                    .push(
+                        text(utils::CRATE_NAME.to_string() + " v" + utils::CRATE_VERSION).size(16),
+                    )
+                    .spacing(10)
+                    .width(Length::Fill)
+                    .height(ACTION_BAR_SIZE)
+                    .align_y(Vertical::Center),
+            )
+            .height(ACTION_BAR_SIZE + 1.0)
+            .padding([0, 7])
+            .style(|_| container::background(color!(0x79716b)).color(Color::WHITE)),
+        );
 
         mouse_area(col).on_scroll(|delta| {
             let delta = match delta {
@@ -602,7 +494,7 @@ impl State {
         let actions = self.get_actions();
         if self.showing_actions && !actions.is_empty() {
             self.selected_action = (self.selected_action + amount).min(actions.len() - 1);
-        } else {
+        } else if !self.results.is_empty() {
             self.selected = (self.selected + amount).min(self.results.len() - 1);
         }
     }
@@ -627,7 +519,7 @@ impl State {
                     return Task::batch([
                         task,
                         window::get_size(window_id).then(move |size| {
-                            window::resize(window_id, Size::new(size.width, SEARCH_SIZE))
+                            window::resize(window_id, Size::new(size.width, BASE_SIZE))
                         }),
                     ]);
                 }
@@ -640,7 +532,7 @@ impl State {
                 self.hide_actions();
                 if self.search_query.is_empty() {
                     return window::get_size(window_id).then(move |size| {
-                        window::resize(window_id, Size::new(size.width, SEARCH_SIZE))
+                        window::resize(window_id, Size::new(size.width, BASE_SIZE))
                     });
                 }
             }
@@ -712,7 +604,7 @@ impl State {
                 self.hide_actions();
                 self.results = results;
                 let new_height =
-                    self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE + SEARCH_SIZE;
+                    self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE + BASE_SIZE;
                 return window::get_size(window_id).then(move |size| {
                     window::resize(window_id, Size::new(size.width, new_height))
                 });
@@ -729,7 +621,7 @@ impl State {
                     self.showing_actions = true;
                     self.selected_action = 0;
                     let new_height = self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE
-                        + SEARCH_SIZE
+                        + BASE_SIZE
                         + actions.len() as f32 * ACTION_SIZE;
                     return window::get_size(window_id).then(move |size| {
                         window::resize(window_id, Size::new(size.width, new_height))
@@ -739,7 +631,7 @@ impl State {
             Message::HideActions => {
                 self.hide_actions();
                 let new_height =
-                    self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE + SEARCH_SIZE;
+                    self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE + BASE_SIZE;
                 return window::get_size(window_id).then(move |size| {
                     window::resize(window_id, Size::new(size.width, new_height))
                 });
@@ -836,6 +728,8 @@ pub fn change_theme(new_theme: Theme) -> Task<Message> {
 const SEARCH_SIZE: f32 = 31.0;
 const ENTRY_SIZE: f32 = 56.0;
 const ACTION_SIZE: f32 = 31.0;
+const ACTION_BAR_SIZE: f32 = 31.0;
+const BASE_SIZE: f32 = SEARCH_SIZE + ACTION_BAR_SIZE;
 
 fn daemon_view(state: &State, id: window::Id) -> Element<'_, Message> {
     if let Some(main_window_id) = state.window {
@@ -859,12 +753,12 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 position: Position::SpecificWith(|winsize, resolution| {
                     Point::new(
                         (resolution.width - winsize.width).max(0.0) / 2.0,
-                        (resolution.height - SEARCH_SIZE - 12.0 * ENTRY_SIZE).max(0.0) / 2.0,
+                        (resolution.height - BASE_SIZE - 12.0 * ENTRY_SIZE).max(0.0) / 2.0,
                     )
                 }),
                 ..Default::default()
             };
-            settings.size.height = SEARCH_SIZE;
+            settings.size.height = BASE_SIZE;
             let (id, open_window_task) = window::open(settings);
             let open_window_task = open_window_task.map(|_| Message::None);
             log::trace!("opened main window with id {id:?}");
@@ -898,7 +792,7 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::IndexerMessage(FileIndexResponse::Starting(sender)) => {
             sender
-                .force_send(FileIndexMessage::SetConfig(CONFIG.clone()))
+                .send(FileIndexMessage::SetConfig(CONFIG.clone()))
                 .expect("this should never fail :3");
             state.index_sender = Some(sender);
             Task::none()
@@ -937,9 +831,40 @@ const fn make_hotkey(mods: HKModifiers, key: Code) -> HotKey {
 
 static HOTKEY: HotKey = make_hotkey(HKModifiers::ALT, Code::KeyP);
 
+#[allow(clippy::missing_panics_doc)]
+pub fn spawn<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let rt = RUNTIME.read().unwrap();
+    let a = rt.as_ref().expect("rt isnt initialized").enter();
+    let handle = tokio::spawn(fut);
+    drop(a);
+    handle
+}
+
+static RUNTIME: RwLock<Option<tokio::runtime::Runtime>> = RwLock::new(None);
+
 fn main() -> iced::Result {
     logging::init();
     log::info!("--- New Run ---");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    *RUNTIME.write().unwrap() = Some(rt);
+    let (shutdown, on_shutdown) = tokio::sync::oneshot::channel::<()>();
+    std::thread::spawn(|| {
+        RUNTIME
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .block_on(on_shutdown)
+    });
+    let sqlite_deinitializer = sqlite::init();
+    spawn(utils::HTTP_CACHE.init());
     let lua = match lua::setup_runtime() {
         Ok(v) => v,
         Err(e) => {
@@ -1010,10 +935,17 @@ fn main() -> iced::Result {
                     });
                 })
             }),
+            cache_clear_sub(),
         ])
     })
     .run()?;
     drop(manager);
+    drop(sqlite_deinitializer);
+    _ = shutdown.send(());
+    let rt = RUNTIME.write().unwrap().take();
+    if let Some(v) = rt {
+        v.shutdown_timeout(Duration::from_secs(10));
+    }
     Ok(())
 }
 
@@ -1025,7 +957,18 @@ fn hotkey_sub() -> Subscription<GlobalHotKeyEvent> {
                 if let Ok(event) = receiver.try_recv() {
                     sender.send(event).await.unwrap();
                 }
-                smol::Timer::interval(Duration::from_millis(50)).await;
+                _ = spawn(async { tokio::time::sleep(Duration::from_millis(50)).await }).await;
+            }
+        })
+    })
+}
+
+fn cache_clear_sub() -> Subscription<Message> {
+    Subscription::run(|| {
+        channel(32, |_: Sender<_>| async move {
+            loop {
+                cache::clean_caches().await;
+                _ = spawn(async { tokio::time::sleep(Duration::from_secs(10 * 60)).await }).await;
             }
         })
     })

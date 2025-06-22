@@ -35,6 +35,10 @@ fn def_false() -> bool {
     false
 }
 
+fn default_keybind() -> String {
+    "Ctrl+Space".into()
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FileWatcherEntry {
     pub path: ArcPath,
@@ -143,4 +147,8 @@ pub struct Config {
     pub files: Files,
     #[serde(default = "Default::default")]
     pub on_blur: BlurAction,
+    #[serde(default = "default_keybind")]
+    pub keybind: String,
+    #[serde(default = "Vec::new")]
+    pub enabled_plugins: Vec<String>,
 }
