@@ -43,7 +43,7 @@ pub fn file_index_service() -> impl Stream<Item = FileIndexResponse> {
     iced::stream::channel(100, async |mut output: mpsc::Sender<_>| {
         _ = crate::spawn(async move {
             let (sender, mut receiver) = unbounded_channel();
-            let (event_sender, mut event_receiver) = unbounded_channel();
+            let (event_sender, event_receiver) = unbounded_channel();
             let file_index = load_fileindex(move |ev| {
                 if let Ok(ev) = ev {
                     if !matches!(ev.kind, EventKind::Create(_) | EventKind::Remove(_)) {
@@ -94,63 +94,76 @@ pub fn file_index_service() -> impl Stream<Item = FileIndexResponse> {
                 }
                 file_index.config.insert(path.0, entry.clone());
             }
-
-            std::thread::spawn(move || {
-                iced::futures::executor::block_on(async move {
-                    let mut watcher = file_index.watcher.write().await;
-                    log::debug!("Starting to watch directories...");
-                    file_index
-                        .children
-                        .values_mut()
-                        .for_each(|v| v.start_watching(&mut watcher));
-                    log::debug!("All directories are being watched...");
-                    drop(watcher);
-                    FILE_INDEX
-                        .set(Arc::new(file_index.into()))
-                        .ok()
-                        .expect("the file indexing service was started multiple times");
-                    let mut prev_file_msg = None;
-                    let mut prev_event = None;
-                    loop {
-                        let res = main_loop(
-                            &mut receiver,
-                            &mut event_receiver,
-                            &mut output,
-                            &mut queue,
-                            prev_file_msg.take(),
-                            prev_event.take(),
-                        )
-                        .await;
-                        match res {
-                            MainLoopResult::Stop => break,
-                            MainLoopResult::Working => {}
-                            MainLoopResult::Idle => {
-                                let fut1 = receiver.recv().map(Ok);
-                                let fut2 = event_receiver.recv().map(Err);
-                                let mut fut1 = pin!(fut1);
-                                let mut fut2 = pin!(fut2);
-                                let fut = std::future::poll_fn(|cx| {
-                                    if let Poll::Ready(v) = fut1.as_mut().poll(cx) {
-                                        return Poll::Ready(v);
-                                    }
-                                    if let Poll::Ready(v) = fut2.as_mut().poll(cx) {
-                                        return Poll::Ready(v);
-                                    }
-                                    Poll::Pending
-                                });
-                                match fut.await {
-                                    Ok(Some(v)) => prev_file_msg = Some(v),
-                                    Err(Some(v)) => prev_event = Some(v),
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    log::debug!("Shutting down file indexer");
-                });
-            });
+            run_thread(file_index, receiver, event_receiver, output, queue);
         }).await;
     })
+}
+
+fn run_thread(
+    mut file_index: FileIndex,
+    mut receiver: UnboundedReceiver<FileIndexMessage>,
+    mut event_receiver: UnboundedReceiver<notify::Event>,
+    mut output: iced::futures::channel::mpsc::Sender<FileIndexResponse>,
+    mut queue: HashSet<ArcPath>,
+) {
+    std::thread::spawn(move || {
+        let mut watcher = file_index.watcher.blocking_write();
+        log::debug!("Starting to watch directories...");
+        file_index
+            .children
+            .values_mut()
+            .for_each(|v| v.start_watching(&mut watcher));
+        log::debug!("All directories are being watched...");
+        drop(watcher);
+        FILE_INDEX
+            .set(Arc::new(file_index.into()))
+            .ok()
+            .expect("the file indexing service was started multiple times");
+        let mut prev_file_msg = None;
+        let mut prev_event = None;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("this should never fail");
+        rt.block_on(async move {
+            loop {
+                let res = main_loop(
+                    &mut receiver,
+                    &mut event_receiver,
+                    &mut output,
+                    &mut queue,
+                    prev_file_msg.take(),
+                    prev_event.take(),
+                )
+                .await;
+                match res {
+                    MainLoopResult::Stop => break,
+                    MainLoopResult::Working => {}
+                    MainLoopResult::Idle => {
+                        let fut1 = receiver.recv().map(Ok);
+                        let fut2 = event_receiver.recv().map(Err);
+                        let mut fut1 = pin!(fut1);
+                        let mut fut2 = pin!(fut2);
+                        let fut = std::future::poll_fn(|cx| {
+                            if let Poll::Ready(v) = fut1.as_mut().poll(cx) {
+                                return Poll::Ready(v);
+                            }
+                            if let Poll::Ready(v) = fut2.as_mut().poll(cx) {
+                                return Poll::Ready(v);
+                            }
+                            Poll::Pending
+                        });
+                        match fut.await {
+                            Ok(Some(v)) => prev_file_msg = Some(v),
+                            Err(Some(v)) => prev_event = Some(v),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        });
+        rt.shutdown_timeout(Duration::from_secs(10));
+        log::debug!("Shutting down file indexer");
+    });
 }
 
 enum MainLoopResult {
