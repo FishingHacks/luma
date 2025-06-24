@@ -96,7 +96,13 @@ pub fn file_index_service() -> impl Stream<Item = FileIndexResponse> {
             }
             file_index.config.insert(path.0, entry.clone());
         }
-        run_thread(file_index, receiver, event_receiver, output, queue);
+        let mut changed = false;
+        file_index.children.retain(|k, _| {
+            let v = file_index.config.contains_key(&k.0);
+            changed |= !v;
+            v
+        });
+        run_thread(file_index, receiver, event_receiver, output, queue, changed);
     })
 }
 
@@ -106,13 +112,15 @@ fn run_thread(
     mut event_receiver: UnboundedReceiver<notify::Event>,
     mut output: iced::futures::channel::mpsc::Sender<FileIndexResponse>,
     mut queue: HashSet<ArcPath>,
+    changed: bool,
 ) {
     std::thread::spawn(move || {
         let mut watcher = file_index.watcher.blocking_write();
         log::debug!("Starting to watch directories...");
         file_index
             .children
-            .values_mut()
+            .iter_mut()
+            .filter_map(|(k, v)| file_index.config.get(&k.0)?.watch.then_some(v))
             .for_each(|v| v.start_watching(&mut watcher));
         log::debug!("All directories are being watched...");
         drop(watcher);
@@ -126,6 +134,11 @@ fn run_thread(
             .build()
             .expect("this should never fail");
         rt.block_on(async move {
+            if changed {
+                tokio::spawn(async move {
+                    update_file_index(&FILE_INDEX.get().unwrap().clone()).await;
+                });
+            }
             loop {
                 let res = main_loop(
                     &mut receiver,

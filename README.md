@@ -77,4 +77,6 @@ Measured in Debug mode:
 Measured in Release mode:
 
 - Indexing /home (~24000 files and directories after filtering): 1.119s
+- Indexing / (~320310 files and directories): 7.797s
 - Queries with ~24000 files, 65 .desktop files, around 25ms
+- Queries with ~320334 files, 65 .desktop files, around 190ms

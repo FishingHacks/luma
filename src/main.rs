@@ -69,12 +69,29 @@ use tokio::sync::mpsc::UnboundedSender;
 pub static CONFIG: LazyLock<Arc<Config>> = LazyLock::new(|| {
     Config {
         files: Files {
-            entries: vec![FileWatcherEntry {
-                path: Path::new("/home/fishi").into(),
-                watch: true,
-                reindex_every: None,
-                filter: ScanFilter::default(),
-            }],
+            entries: vec![
+                FileWatcherEntry {
+                    path: Path::new("/home/fishi").into(),
+                    watch: true,
+                    reindex_every: None,
+                    filter: ScanFilter::default(),
+                },
+                // FileWatcherEntry {
+                //     path: Path::new("/").into(),
+                //     watch: false,
+                //     reindex_every: None,
+                //     filter: ScanFilter {
+                //         deny_paths: vec![
+                //             Path::new("/dev").into(),
+                //             Path::new("/proc").into(),
+                //             Path::new("/srv").into(),
+                //             Path::new("/sys").into(),
+                //             Path::new("/lost+found").into(),
+                //         ],
+                //         ..Default::default()
+                //     },
+                // },
+            ],
             reindex_at_startup: false,
         },
         on_blur: BlurAction::Refocus,
