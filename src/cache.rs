@@ -143,7 +143,7 @@ impl HTTPCache {
             .write()
             .await
             .insert(url.to_string(), vec![sender]);
-        crate::spawn(async move {
+        tokio::spawn(async move {
             log::debug!("fetching {url}");
             let me = &*crate::utils::HTTP_CACHE;
             let res = me.run_request(&url, timeout, ttl).await;

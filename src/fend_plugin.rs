@@ -114,7 +114,7 @@ impl Plugin for FendPlugin {
             .blocking_write()
             .set_exchange_rate_handler_v1(ExchangeRateHandler);
         if !GETTING_CURRENCIES.swap(true, Ordering::Relaxed) {
-            crate::spawn(async {
+            tokio::spawn(async {
                 let res = utils::HTTP_CACHE
                     .get(
                         "https://open.er-api.com/v6/latest/USD",

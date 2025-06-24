@@ -9,7 +9,7 @@ use std::{
     ffi::OsStr,
     fmt::Debug,
     path::Path,
-    sync::{Arc, LazyLock, RwLock},
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
@@ -831,40 +831,10 @@ const fn make_hotkey(mods: HKModifiers, key: Code) -> HotKey {
 
 static HOTKEY: HotKey = make_hotkey(HKModifiers::ALT, Code::KeyP);
 
-#[allow(clippy::missing_panics_doc)]
-pub fn spawn<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    let rt = RUNTIME.read().unwrap();
-    let a = rt.as_ref().expect("rt isnt initialized").enter();
-    let handle = tokio::spawn(fut);
-    drop(a);
-    handle
-}
-
-static RUNTIME: RwLock<Option<tokio::runtime::Runtime>> = RwLock::new(None);
-
 fn main() -> iced::Result {
     logging::init();
     log::info!("--- New Run ---");
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    *RUNTIME.write().unwrap() = Some(rt);
-    let (shutdown, on_shutdown) = tokio::sync::oneshot::channel::<()>();
-    std::thread::spawn(|| {
-        RUNTIME
-            .read()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .block_on(on_shutdown)
-    });
     let sqlite_deinitializer = sqlite::init();
-    spawn(utils::HTTP_CACHE.init());
     let lua = match lua::setup_runtime() {
         Ok(v) => v,
         Err(e) => {
@@ -906,7 +876,9 @@ fn main() -> iced::Result {
             state.add_plugin::<RunPlugin>();
             state.add_lua_plugins();
             state.add_plugin::<FilePlugin>();
-            (state, text_input::focus(text_input_id))
+            let focus_task = text_input::focus(text_input_id);
+            let http_cache_init_task = Task::perform(utils::HTTP_CACHE.init(), |_| Message::None);
+            (state, Task::batch([focus_task, http_cache_init_task]))
         },
         daemon_update,
         daemon_view,
@@ -941,11 +913,6 @@ fn main() -> iced::Result {
     .run()?;
     drop(manager);
     drop(sqlite_deinitializer);
-    _ = shutdown.send(());
-    let rt = RUNTIME.write().unwrap().take();
-    if let Some(v) = rt {
-        v.shutdown_timeout(Duration::from_secs(10));
-    }
     Ok(())
 }
 
@@ -957,7 +924,7 @@ fn hotkey_sub() -> Subscription<GlobalHotKeyEvent> {
                 if let Ok(event) = receiver.try_recv() {
                     sender.send(event).await.unwrap();
                 }
-                _ = spawn(async { tokio::time::sleep(Duration::from_millis(50)).await }).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
     })
@@ -968,7 +935,7 @@ fn cache_clear_sub() -> Subscription<Message> {
         channel(32, |_: Sender<_>| async move {
             loop {
                 cache::clean_caches().await;
-                _ = spawn(async { tokio::time::sleep(Duration::from_secs(10 * 60)).await }).await;
+                tokio::time::sleep(Duration::from_secs(10 * 60)).await;
             }
         })
     })

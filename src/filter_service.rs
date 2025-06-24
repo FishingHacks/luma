@@ -167,7 +167,11 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
         }
 
         std::thread::spawn(move || {
-            iced::futures::executor::block_on(async {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("failed to run tokio collector runtime");
+            rt.block_on(async {
                 loop {
                     let (plugins, mut query, should_stop) = match StreamExt::next(&mut receiver)
                         .await
@@ -218,15 +222,13 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                         }
                         let next_msg = pin!(next_message_fn());
                         // https://preview.redd.it/7nv2i903ezba1.png?width=320&crop=smart&auto=webp&s=8c198937d80657b642b857b9a49346f48f49a0d9
-                        let the_eeper = pin!(crate::spawn(async {
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                        }));
+                        let the_eeper = pin!(tokio::time::sleep(Duration::from_millis(200)));
                         let res = Joinall(futures, the_eeper, next_msg).await;
                         match res {
                             JoinAllResult::Abort => break,
                             JoinAllResult::Done(moved_futures) => futures = moved_futures,
                         }
-                        let mut writer = result_builder.to_inner().blocking_write();
+                        let mut writer = result_builder.to_inner().write().await;
                         if writer.len() == sent_previously {
                             continue;
                         }
@@ -253,6 +255,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                     }
                 }
             });
+            rt.shutdown_timeout(Duration::from_secs(10));
         });
     })
 }

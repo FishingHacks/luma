@@ -17,9 +17,12 @@ use notify::{
     event::{CreateKind, RemoveKind},
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{
-    RwLock,
-    mpsc::{UnboundedReceiver, UnboundedSender, error::TryRecvError, unbounded_channel},
+use tokio::{
+    sync::{
+        RwLock,
+        mpsc::{UnboundedReceiver, UnboundedSender, error::TryRecvError, unbounded_channel},
+    },
+    time::sleep,
 };
 
 use crate::{
@@ -41,61 +44,59 @@ pub enum FileIndexResponse {
 
 pub fn file_index_service() -> impl Stream<Item = FileIndexResponse> {
     iced::stream::channel(100, async |mut output: mpsc::Sender<_>| {
-        _ = crate::spawn(async move {
-            let (sender, mut receiver) = unbounded_channel();
-            let (event_sender, event_receiver) = unbounded_channel();
-            let file_index = load_fileindex(move |ev| {
-                if let Ok(ev) = ev {
-                    if !matches!(ev.kind, EventKind::Create(_) | EventKind::Remove(_)) {
-                        return;
-                    }
-                    match event_sender.send(ev) {
-                        Ok(()) => {}
-                        Err(_) => log::error!(
-                            "the file indexing is stopped, but events are still received. this should never happen. you might want to restart the application and reindex directories you're watching."
-                        ),
-                    }
+        let (sender, mut receiver) = unbounded_channel();
+        let (event_sender, event_receiver) = unbounded_channel();
+        let file_index = load_fileindex(move |ev| {
+            if let Ok(ev) = ev {
+                if !matches!(ev.kind, EventKind::Create(_) | EventKind::Remove(_)) {
+                    return;
                 }
-            });
-            let Some(mut file_index) = file_index.await else {
-                log::debug!("Stopping file indexing");
-                return;
-            };
-            output
-                .send(FileIndexResponse::Starting(sender))
-                .await
-                .expect("the application exited but this is somehow still running");
-            let config = loop {
-                match receiver.recv().await {
-                    Some(FileIndexMessage::SetConfig(config)) => break config,
-                    Some(FileIndexMessage::Reindex(_)) => {}
-                    None => {
-                        log::debug!(
-                            "Stopping file indexing: main thread didn't send a config before quitting"
-                        );
-                        return;
-                    }
+                match event_sender.send(ev) {
+                    Ok(()) => {}
+                    Err(_) => log::error!(
+                        "the file indexing is stopped, but events are still received. this should never happen. you might want to restart the application and reindex directories you're watching."
+                    ),
                 }
-            };
-            let files = &config.files;
-            let mut queue = HashSet::new();
-            for entry in &files.entries {
-                if file_index.config.contains_key(&*entry.path) {
-                    log::error!(
-                        "The config contains multiple entries for {}.\nPlease edit the config at {}",
-                        entry.path.display(),
-                        CONFIG_FILE.display()
+            }
+        });
+        let Some(mut file_index) = file_index.await else {
+            log::debug!("Stopping file indexing");
+            return;
+        };
+        output
+            .send(FileIndexResponse::Starting(sender))
+            .await
+            .expect("the application exited but this is somehow still running");
+        let config = loop {
+            match receiver.recv().await {
+                Some(FileIndexMessage::SetConfig(config)) => break config,
+                Some(FileIndexMessage::Reindex(_)) => {}
+                None => {
+                    log::debug!(
+                        "Stopping file indexing: main thread didn't send a config before quitting"
                     );
                     return;
                 }
-                let path = entry.path.clone();
-                if files.reindex_at_startup || !file_index.children.contains_key(&path) {
-                    queue.insert(path.clone());
-                }
-                file_index.config.insert(path.0, entry.clone());
             }
-            run_thread(file_index, receiver, event_receiver, output, queue);
-        }).await;
+        };
+        let files = &config.files;
+        let mut queue = HashSet::new();
+        for entry in &files.entries {
+            if file_index.config.contains_key(&*entry.path) {
+                log::error!(
+                    "The config contains multiple entries for {}.\nPlease edit the config at {}",
+                    entry.path.display(),
+                    CONFIG_FILE.display()
+                );
+                return;
+            }
+            let path = entry.path.clone();
+            if files.reindex_at_startup || !file_index.children.contains_key(&path) {
+                queue.insert(path.clone());
+            }
+            file_index.config.insert(path.0, entry.clone());
+        }
+        run_thread(file_index, receiver, event_receiver, output, queue);
     })
 }
 
@@ -228,7 +229,7 @@ async fn main_loop(
     }
     if event_receiver.is_empty() {
         // wait 10 seconds and collect all events, so we don't get overwhelmed.
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        sleep(Duration::from_secs(10)).await;
     }
 
     let mut writer = index.write().await;
