@@ -20,7 +20,7 @@ use iced::{
 };
 use tokio::sync::RwLock;
 
-use crate::{AnyPlugin, Entry, GenericEntry, matcher::MatcherInput};
+use crate::{AnyPlugin, Context, Entry, GenericEntry, matcher::MatcherInput};
 
 #[derive(Clone, Copy)]
 pub struct ResultBuilderRef<'a> {
@@ -102,6 +102,7 @@ impl ResultBuilder {
 enum Action {
     Stop,
     Start(Arc<Vec<Box<dyn AnyPlugin>>>, String, Arc<AtomicBool>),
+    Context(Context),
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +150,16 @@ impl CollectorController {
             }
         }
     }
+
+    pub(crate) fn init(&mut self, ctx: Context) {
+        match self.sender.try_send(Action::Context(ctx)) {
+            Ok(_) => {}
+            Err(e) if e.is_full() => {
+                unreachable!("the channel should never be full at the first message")
+            }
+            Err(e) => log::error!("the collector exited early during init: {e:?}"),
+        }
+    }
 }
 
 pub fn collector() -> impl Stream<Item = CollectorMessage> {
@@ -165,6 +176,16 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                 return;
             }
         }
+        let context = loop {
+            match receiver.next().await {
+                Some(Action::Context(ctx)) => break ctx,
+                Some(_) => {}
+                None => {
+                    log::debug!("stopping collector: main thread exited");
+                    return;
+                }
+            }
+        };
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -176,6 +197,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                     let (plugins, mut query, should_stop) = match StreamExt::next(&mut receiver)
                         .await
                     {
+                        Some(Action::Context(_)) => unreachable!(),
                         Some(Action::Stop) => continue,
                         Some(Action::Start(plugins, query, stop_bool)) => {
                             (plugins, query, stop_bool)
@@ -201,6 +223,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                                     input,
                                     &result_builder,
                                     id,
+                                    context.clone(),
                                 )];
                             }
                         }
@@ -210,7 +233,12 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                             .iter()
                             .enumerate()
                             .map(|(id, plugin)| {
-                                plugin.any_get_for_values(input.clone(), &result_builder, id)
+                                plugin.any_get_for_values(
+                                    input.clone(),
+                                    &result_builder,
+                                    id,
+                                    context.clone(),
+                                )
                             })
                             .collect::<Vec<_>>()
                     };

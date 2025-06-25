@@ -9,7 +9,7 @@ use std::{
 
 use freedesktop_file_parser::EntryType;
 
-use crate::cache::{Cache, HTTPCache};
+use crate::cache::Cache;
 
 pub static CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 pub static CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -257,4 +257,3 @@ pub static DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
 });
 
 pub static CONFIG_FILE: LazyLock<PathBuf> = LazyLock::new(|| CONFIG_DIR.join("config.toml"));
-pub static HTTP_CACHE: LazyLock<HTTPCache> = LazyLock::new(HTTPCache::new);

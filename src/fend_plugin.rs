@@ -13,7 +13,7 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::{
-    Action, CustomData, Entry, Message, Plugin, filter_service::ResultBuilderRef,
+    Action, CustomData, Entry, Message, Plugin, cache::HTTPCache, filter_service::ResultBuilderRef,
     matcher::MatcherInput, utils,
 };
 
@@ -64,7 +64,12 @@ impl Plugin for FendPlugin {
         "fend"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
+    async fn get_for_values(
+        &self,
+        input: &MatcherInput,
+        builder: ResultBuilderRef<'_>,
+        _: crate::Context,
+    ) {
         // for some reason rust doesn't like this block not being here :< [it thinks the writer is
         // being dropped after the await, even tho it gets moved into the drop function?]
         let result = {
@@ -92,7 +97,7 @@ impl Plugin for FendPlugin {
             .await;
     }
 
-    fn handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
+    fn handle_pre(&self, thing: CustomData, action: &str, _: crate::Context) -> Task<Message> {
         let v = thing.into::<Arc<str>>();
         match action {
             "copy" => clipboard::write(v.to_string()),
@@ -109,19 +114,20 @@ impl Plugin for FendPlugin {
         }
     }
 
-    fn init(&mut self) {
+    fn init(&mut self, ctx: crate::Context) {
         self.0
             .blocking_write()
             .set_exchange_rate_handler_v1(ExchangeRateHandler);
         if !GETTING_CURRENCIES.swap(true, Ordering::Relaxed) {
-            tokio::spawn(async {
-                let res = utils::HTTP_CACHE
-                    .get(
-                        "https://open.er-api.com/v6/latest/USD",
-                        None,
-                        Some(REFRESH_TIMEOUT),
-                    )
-                    .await;
+            tokio::spawn(async move {
+                let res = HTTPCache::get(
+                    ctx.http_cache,
+                    &ctx.sqlite,
+                    "https://open.er-api.com/v6/latest/USD",
+                    None,
+                    Some(REFRESH_TIMEOUT),
+                )
+                .await;
                 GETTING_CURRENCIES.store(false, Ordering::Relaxed);
                 if !res.err.is_empty() {
                     log::error!("Failed to get the currency exchange rates: {}", res.err);

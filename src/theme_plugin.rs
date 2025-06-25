@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use iced::{Task, Theme};
 
 use crate::{
-    Action, CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput,
+    Action, Context, CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput,
     plugin::StringLike,
 };
 
@@ -22,7 +22,12 @@ impl Plugin for ThemePlugin {
         "theme"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
+    async fn get_for_values(
+        &self,
+        input: &MatcherInput,
+        builder: ResultBuilderRef<'_>,
+        _: Context,
+    ) {
         let iter = THEMES.iter().filter(|&v| input.matches(&v.0)).map(|v| {
             Entry::new(
                 v.0.clone(),
@@ -33,9 +38,9 @@ impl Plugin for ThemePlugin {
         builder.commit(iter).await;
     }
 
-    fn init(&mut self) {}
+    fn init(&mut self, _: Context) {}
 
-    fn handle_pre(&self, thing: CustomData, _: &str) -> iced::Task<Message> {
+    fn handle_pre(&self, thing: CustomData, _: &str, _: Context) -> iced::Task<Message> {
         Task::done(Message::ChangeTheme(thing.into::<Theme>()))
     }
 

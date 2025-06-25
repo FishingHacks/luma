@@ -11,7 +11,7 @@ use tokio::sync::{
     mpsc::{Sender, channel},
 };
 
-use crate::plugin::StringLike;
+use crate::{Context, plugin::StringLike, sqlite::SqliteContext};
 
 pub struct Cache<K: Hash + Eq, V, E, F: FnMut(K) -> Result<(K, V), E>> {
     inner: HashMap<K, (V, Instant)>,
@@ -79,18 +79,20 @@ pub struct HTTPCache {
 }
 
 impl HTTPCache {
-    pub async fn init(&self) -> rusqlite::Result<()> {
-        crate::sqlite::await_execute("CREATE TABLE get_request_cache(url TEXT, ttl INTEGER, body BLOB, err TEXT, result_code INTEGER)", [].into()).await?;
+    pub async fn init(&self, context: SqliteContext) -> rusqlite::Result<()> {
+        crate::sqlite::await_execute(&context, "CREATE TABLE get_request_cache(url TEXT, ttl INTEGER, body BLOB, err TEXT, result_code INTEGER)", [].into()).await?;
         Ok(())
     }
     pub async fn get(
-        &self,
+        me: Arc<RwLock<HTTPCache>>,
+        context: &SqliteContext,
         url: impl Into<StringLike>,
         timeout: Option<Duration>,
         ttl: Option<Duration>,
     ) -> Arc<HTTPResponse> {
         let url = url.into();
-        if let Some(v) = self.waiting.write().await.get_mut(url.to_str()) {
+        let reader = me.read().await;
+        if let Some(v) = reader.waiting.write().await.get_mut(url.to_str()) {
             let (sender, mut receiver) = channel(1);
             v.push(sender);
             return receiver
@@ -98,7 +100,7 @@ impl HTTPCache {
                 .await
                 .expect("failed to receive...... this is bad");
         }
-        let mut in_memory_cache = self.in_memory_cache.write().await;
+        let mut in_memory_cache = reader.in_memory_cache.write().await;
         if let Some(v) = in_memory_cache.get(url.to_str()) {
             if v.ttl >= SystemTime::now() {
                 log::debug!("returning {url} from local cache");
@@ -109,7 +111,9 @@ impl HTTPCache {
         drop(in_memory_cache);
         let params1 = Box::new([Box::new(url.clone()) as Box<_>]);
         let params = Box::new([Box::new(url.clone()) as Box<_>]);
+        let ctx = context.clone();
         if let Ok(v) = crate::sqlite::await_query(
+            context,
             "SELECT * FROM get_request_cache WHERE url = ?1",
             params1,
             move |row| {
@@ -117,7 +121,11 @@ impl HTTPCache {
                 let ttl = SystemTime::UNIX_EPOCH + Duration::from_secs(ttl);
                 if ttl < SystemTime::now() {
                     log::debug!("database entry is to old :<");
-                    crate::sqlite::execute("DELETE FROM get_request_cache WHERE url = ?1", params);
+                    crate::sqlite::execute(
+                        &ctx,
+                        "DELETE FROM get_request_cache WHERE url = ?1",
+                        params,
+                    );
                     return Err(rusqlite::Error::QueryReturnedNoRows);
                 }
                 Ok(HTTPResponse {
@@ -131,7 +139,8 @@ impl HTTPCache {
         .await
         {
             let arc = Arc::new(v);
-            self.in_memory_cache
+            reader
+                .in_memory_cache
                 .write()
                 .await
                 .insert(url.to_string(), arc.clone());
@@ -139,25 +148,30 @@ impl HTTPCache {
             return arc;
         }
         let (sender, mut receiver) = channel(1);
-        self.waiting
+        reader
+            .waiting
             .write()
             .await
             .insert(url.to_string(), vec![sender]);
+        drop(reader);
+        let ctx = context.clone();
         tokio::spawn(async move {
+            let reader = me.read().await;
             log::debug!("fetching {url}");
-            let me = &*crate::utils::HTTP_CACHE;
-            let res = me.run_request(&url, timeout, ttl).await;
+            let res = reader.run_request(&url, timeout, ttl).await;
             let res = Arc::new(res);
-            me.in_memory_cache
+            reader
+                .in_memory_cache
                 .write()
                 .await
                 .insert(url.to_string(), res.clone());
-            if let Some(v) = me.waiting.write().await.remove(url.to_str()) {
+            if let Some(v) = reader.waiting.write().await.remove(url.to_str()) {
                 for v in &v {
                     _ = v.try_send(res.clone());
                 }
             }
             crate::sqlite::execute(
+                &ctx,
                 "INSERT INTO get_request_cache (url, result_code, body, err, ttl) values (?1, ?2, ?3, ?4, ?5)",
                 [
                     Box::new(url) as Box<_>,
@@ -240,10 +254,10 @@ impl HTTPCache {
     }
 }
 
-pub async fn clean_caches() {
+pub async fn clean_caches(ctx: &Context) {
     crate::utils::DESKTOP_FILE_INFO_CACHE
         .write()
         .expect("desktop file cache is poisoned :<")
         .clean();
-    crate::utils::HTTP_CACHE.clean().await;
+    ctx.http_cache.read().await.clean().await;
 }

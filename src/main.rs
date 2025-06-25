@@ -13,11 +13,12 @@ use std::{
     time::Duration,
 };
 
+use cache::HTTPCache;
 use config::{BlurAction, Config, FileWatcherEntry, Files, ScanFilter};
 use control_plugin::ControlPlugin;
 use dice_plugin::DicePlugin;
 use fend_plugin::FendPlugin;
-use file_index::{FileIndexMessage, FileIndexResponse};
+use file_index::{FileIndex, FileIndexMessage, FileIndexResponse};
 use file_plugin::FilePlugin;
 use filter_service::{CollectorController, CollectorMessage, ResultBuilderRef};
 use global_hotkey::{
@@ -40,6 +41,7 @@ use mlua::Lua;
 use run_plugin::RunPlugin;
 use search_input::SearchInput;
 use special_windows::SpecialWindowState;
+use sqlite::SqliteContext;
 use theme_plugin::ThemePlugin;
 
 mod cache;
@@ -64,7 +66,9 @@ mod utils;
 pub use filter_service::ResultBuilder;
 use plugin::{AnyPlugin, GenericEntry};
 pub use plugin::{CustomData, Entry, Plugin};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{
+    RwLock, mpsc::Sender as TokioSender, mpsc::UnboundedSender, mpsc::channel as bounded,
+};
 
 pub static CONFIG: LazyLock<Arc<Config>> = LazyLock::new(|| {
     Config {
@@ -101,6 +105,13 @@ pub static CONFIG: LazyLock<Arc<Config>> = LazyLock::new(|| {
     .into()
 });
 
+#[derive(Clone)]
+pub struct Context {
+    http_cache: Arc<RwLock<HTTPCache>>,
+    file_index: Arc<RwLock<FileIndex>>,
+    sqlite: SqliteContext,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     UpdateSearch(String),
@@ -127,6 +138,7 @@ pub enum Message {
     ResultsUpdated,
     KeyPressed(Key, Modifiers),
     ShowActions,
+    GetContext(TokioSender<Context>),
     HideActions,
     Blurred,
     OpenSpecial(SpecialWindowState),
@@ -151,6 +163,7 @@ pub struct State {
     on_blur: BlurAction,
     special_windows: BTreeMap<window::Id, SpecialWindowState>,
     lua: Lua,
+    context: Context,
 }
 
 const ALLOWED_ACTION_MODIFIERS: Modifiers = Modifiers::COMMAND
@@ -483,7 +496,7 @@ impl State {
         if action.closes {
             let entry = self.results.remove(index);
             Task::batch([
-                plugin.any_handle_pre(entry.data.clone(), &action.id),
+                plugin.any_handle_pre(entry.data.clone(), &action.id, self.context.clone()),
                 Task::done(Message::HideMainWindow),
                 Task::done(Message::HandleAction {
                     plugin: entry.plugin,
@@ -493,8 +506,8 @@ impl State {
             ])
         } else {
             Task::batch([
-                plugin.any_handle_pre(entry.data.clone(), &action.id),
-                plugin.any_handle_post(entry.data.clone(), &action.id),
+                plugin.any_handle_pre(entry.data.clone(), &action.id, self.context.clone()),
+                plugin.any_handle_post(entry.data.clone(), &action.id, self.context.clone()),
             ])
         }
     }
@@ -667,6 +680,7 @@ impl State {
             | Message::None
             | Message::Exit
             | Message::IndexerMessage(_)
+            | Message::GetContext(_)
             | Message::CollectorMessage(CollectorMessage::Ready(_)) => unreachable!(),
         }
         if self.selected < self.offset {
@@ -730,7 +744,7 @@ impl State {
                 .iter_mut()
                 .map(|v| {
                     let mut plugin = v();
-                    plugin.any_init();
+                    plugin.any_init(self.context.clone());
                     plugin
                 })
                 .collect(),
@@ -795,10 +809,9 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             plugin,
             data,
             action,
-        } => state
-            .plugins
-            .get(plugin)
-            .map_or_else(Task::none, |plugin| plugin.any_handle_post(data, &action)),
+        } => state.plugins.get(plugin).map_or_else(Task::none, |plugin| {
+            plugin.any_handle_post(data, &action, state.context.clone())
+        }),
         Message::Exit => iced::exit(),
         Message::None => Task::none(),
         Message::IndexerMessage(FileIndexResponse::IndexFinished) if state.window.is_none() => {
@@ -809,12 +822,25 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::IndexerMessage(FileIndexResponse::Starting(sender)) => {
             sender
+                .send(FileIndexMessage::SetFileIndex(
+                    state.context.file_index.clone(),
+                ))
+                .expect("this should never fail :3");
+            sender
                 .send(FileIndexMessage::SetConfig(CONFIG.clone()))
                 .expect("this should never fail :3");
             state.index_sender = Some(sender);
             Task::none()
         }
-        Message::CollectorMessage(CollectorMessage::Ready(controller)) => {
+        Message::GetContext(sender) => {
+            // it is fine to ignore the error, because it's either full or disconnected.
+            // in the case of full, the sender already got the context
+            // in the case of disconnected, the sender is no longer interested.
+            _ = sender.try_send(state.context.clone());
+            Task::none()
+        }
+        Message::CollectorMessage(CollectorMessage::Ready(mut controller)) => {
+            controller.init(state.context.clone());
             state.collector_controller = Some(controller);
             Task::none()
         }
@@ -851,7 +877,7 @@ static HOTKEY: HotKey = make_hotkey(HKModifiers::ALT, Code::KeyP);
 fn main() -> iced::Result {
     logging::init();
     log::info!("--- New Run ---");
-    let sqlite_deinitializer = sqlite::init();
+    let (sqlite, sqlite_deinitializer) = sqlite::init().expect("failed to initialize sqlite");
     let lua = match lua::setup_runtime() {
         Ok(v) => v,
         Err(e) => {
@@ -885,6 +911,11 @@ fn main() -> iced::Result {
                 on_blur: BlurAction::Refocus,
                 special_windows: BTreeMap::new(),
                 lua: lua.clone(),
+                context: Context {
+                    http_cache: Arc::new(HTTPCache::new().into()),
+                    file_index: Arc::new(RwLock::new(FileIndex::new())),
+                    sqlite: sqlite.clone(),
+                },
             };
             state.add_plugin::<ControlPlugin>();
             state.add_plugin::<ThemePlugin>();
@@ -894,7 +925,12 @@ fn main() -> iced::Result {
             state.add_lua_plugins();
             state.add_plugin::<FilePlugin>();
             let focus_task = text_input::focus(text_input_id);
-            let http_cache_init_task = Task::perform(utils::HTTP_CACHE.init(), |_| Message::None);
+            let http_cache = state.context.http_cache.clone();
+            let sqlite = sqlite.clone();
+            let http_cache_init_task = Task::perform(
+                async move { http_cache.read().await.init(sqlite).await },
+                |_| Message::None,
+            );
             (state, Task::batch([focus_task, http_cache_init_task]))
         },
         daemon_update,
@@ -949,9 +985,18 @@ fn hotkey_sub() -> Subscription<GlobalHotKeyEvent> {
 
 fn cache_clear_sub() -> Subscription<Message> {
     Subscription::run(|| {
-        channel(32, |_: Sender<_>| async move {
+        channel(32, |mut output: Sender<_>| async move {
+            let (sender, mut receiver) = bounded(1);
+            if output.send(Message::GetContext(sender)).await.is_err() {
+                // the main loop exited
+                return;
+            }
+            // the main loop exited
+            let Some(context) = receiver.recv().await else {
+                return;
+            };
             loop {
-                cache::clean_caches().await;
+                cache::clean_caches(&context).await;
                 tokio::time::sleep(Duration::from_secs(10 * 60)).await;
             }
         })

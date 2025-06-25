@@ -10,7 +10,7 @@ use rusqlite::ToSql;
 
 use crate::filter_service::ResultBuilderRef;
 use crate::matcher::MatcherInput;
-use crate::{Action, Message, ResultBuilder};
+use crate::{Action, Context, Message, ResultBuilder};
 
 #[derive(Clone, Debug, Eq)]
 pub enum StringLike {
@@ -241,21 +241,23 @@ pub trait Plugin: Send + Sync {
         &self,
         input: Arc<MatcherInput>,
         builder: ResultBuilderRef<'_>,
+        context: Context,
     ) -> impl std::future::Future<Output = ()> + std::marker::Send {
-        async move { self.get_for_values(&input, builder).await }
+        async move { self.get_for_values(&input, builder, context).await }
     }
     fn get_for_values(
         &self,
         input: &MatcherInput,
         builder: ResultBuilderRef<'_>,
+        context: Context,
     ) -> impl std::future::Future<Output = ()> + std::marker::Send;
-    fn init(&mut self);
+    fn init(&mut self, context: Context);
     #[allow(unused_variables)]
-    fn handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
+    fn handle_pre(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {
         Task::none()
     }
     #[allow(unused_variables)]
-    fn handle_post(&self, thing: CustomData, action: &str) -> Task<Message> {
+    fn handle_post(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {
         Task::none()
     }
 }
@@ -305,10 +307,11 @@ pub trait AnyPlugin: Send + Sync {
         input: Arc<MatcherInput>,
         builder: &'future ResultBuilder,
         plugin_id: usize,
+        context: Context,
     ) -> BoxFuture<'future, ()>;
-    fn any_init(&mut self);
-    fn any_handle_pre(&self, thing: CustomData, action: &str) -> Task<Message>;
-    fn any_handle_post(&self, thing: CustomData, action: &str) -> Task<Message>;
+    fn any_init(&mut self, context: Context);
+    fn any_handle_pre(&self, thing: CustomData, action: &str, context: Context) -> Task<Message>;
+    fn any_handle_post(&self, thing: CustomData, action: &str, context: Context) -> Task<Message>;
 }
 impl<T: Plugin + 'static> AnyPlugin for T {
     fn as_any_ref(&self) -> &dyn std::any::Any {
@@ -328,20 +331,21 @@ impl<T: Plugin + 'static> AnyPlugin for T {
         input: Arc<MatcherInput>,
         builder: &'fut ResultBuilder,
         plugin_id: usize,
+        context: Context,
     ) -> BoxFuture<'fut, ()> {
         let builder = ResultBuilderRef::create(plugin_id, builder);
-        Box::pin(self.get_for_values_arc(input, builder))
+        Box::pin(self.get_for_values_arc(input, builder, context))
     }
 
-    fn any_init(&mut self) {
-        self.init();
+    fn any_init(&mut self, context: Context) {
+        self.init(context);
     }
 
-    fn any_handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
-        self.handle_pre(thing, action)
+    fn any_handle_pre(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {
+        self.handle_pre(thing, action, context)
     }
-    fn any_handle_post(&self, thing: CustomData, action: &str) -> Task<Message> {
-        self.handle_post(thing, action)
+    fn any_handle_post(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {
+        self.handle_post(thing, action, context)
     }
 }
 

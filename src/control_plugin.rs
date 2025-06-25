@@ -38,7 +38,12 @@ impl Plugin for ControlPlugin {
         "control"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
+    async fn get_for_values(
+        &self,
+        input: &MatcherInput,
+        builder: ResultBuilderRef<'_>,
+        _: crate::Context,
+    ) {
         let iter = ACTIONS
             .iter()
             .filter(|&action| input.matches(action.get_name()))
@@ -52,9 +57,9 @@ impl Plugin for ControlPlugin {
         builder.commit(iter).await;
     }
 
-    fn init(&mut self) {}
+    fn init(&mut self, _: crate::Context) {}
 
-    fn handle_pre(&self, thing: CustomData, _: &str) -> iced::Task<Message> {
+    fn handle_pre(&self, thing: CustomData, _: &str, _: crate::Context) -> iced::Task<Message> {
         match thing.into::<Action>() {
             Action::Quit => Task::done(Message::Exit),
             Action::Hide => Task::none(),

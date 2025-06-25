@@ -8,8 +8,8 @@ use iced::{
 };
 
 use crate::{
-    Action, CustomData, Entry, Message, Plugin, ResultBuilderRef, file_index::FILE_INDEX,
-    matcher::MatcherInput, plugin::StringLike, utils,
+    Action, Context, CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput,
+    plugin::StringLike, utils,
 };
 
 #[derive(Default)]
@@ -46,11 +46,13 @@ impl Plugin for FilePlugin {
         "file"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
-        let Some(index) = FILE_INDEX.get() else {
-            return;
-        };
-        let reader = index.read().await;
+    async fn get_for_values(
+        &self,
+        input: &MatcherInput,
+        builder: ResultBuilderRef<'_>,
+        context: Context,
+    ) {
+        let reader = context.file_index.read().await;
         let iter = iter(
             input,
             reader
@@ -62,9 +64,9 @@ impl Plugin for FilePlugin {
         builder.commit(iter).await;
     }
 
-    fn init(&mut self) {}
+    fn init(&mut self, _: Context) {}
 
-    fn handle_pre(&self, thing: CustomData, action: &str) -> Task<Message> {
+    fn handle_pre(&self, thing: CustomData, action: &str, _: Context) -> Task<Message> {
         let path = thing.into::<Arc<Path>>();
         if action == "open" {
             utils::open_file(path);

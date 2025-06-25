@@ -14,7 +14,12 @@ impl Plugin for DicePlugin {
         "roll"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
+    async fn get_for_values(
+        &self,
+        input: &MatcherInput,
+        builder: ResultBuilderRef<'_>,
+        _: crate::Context,
+    ) {
         let words = input.words();
         if words.is_empty() {
             return;
@@ -38,9 +43,14 @@ impl Plugin for DicePlugin {
         builder.commit(entries.into_iter()).await;
     }
 
-    fn init(&mut self) {}
+    fn init(&mut self, _: crate::Context) {}
 
-    fn handle_pre(&self, thing: crate::CustomData, _: &str) -> iced::Task<crate::Message> {
+    fn handle_pre(
+        &self,
+        thing: crate::CustomData,
+        _: &str,
+        _: crate::Context,
+    ) -> iced::Task<crate::Message> {
         clipboard::write(format!("{}", thing.into::<usize>()))
     }
 

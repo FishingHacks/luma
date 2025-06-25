@@ -8,7 +8,8 @@ use iced::{
 };
 
 use crate::{
-    Action, CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput, utils,
+    Action, Context, CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput,
+    utils,
 };
 
 struct FileEntry {
@@ -29,7 +30,12 @@ impl Plugin for RunPlugin {
         "run"
     }
 
-    async fn get_for_values(&self, input: &MatcherInput, builder: ResultBuilderRef<'_>) {
+    async fn get_for_values(
+        &self,
+        input: &MatcherInput,
+        builder: ResultBuilderRef<'_>,
+        _: Context,
+    ) {
         let iter = self
             .files
             .iter()
@@ -42,7 +48,7 @@ impl Plugin for RunPlugin {
         builder.commit(iter).await;
     }
 
-    fn init(&mut self) {
+    fn init(&mut self, _: Context) {
         let mut file_entries = Vec::new();
         let mut programs = HashSet::new();
         for dir in utils::APPLICATION_DIRS.iter() {
@@ -98,7 +104,7 @@ impl Plugin for RunPlugin {
         self.files = file_entries;
     }
 
-    fn handle_pre(&self, thing: CustomData, action: &str) -> iced::Task<Message> {
+    fn handle_pre(&self, thing: CustomData, action: &str, _: Context) -> iced::Task<Message> {
         let file = &self.files[thing.into::<usize>()];
 
         if action == "run" {

@@ -27,25 +27,21 @@ enum SqliteRequest {
     Shutdown,
 }
 
-static SENDER: OnceLock<Arc<UnboundedSender<SqliteRequest>>> = OnceLock::new();
+#[derive(Clone, Debug)]
+pub struct SqliteContext(Arc<UnboundedSender<SqliteRequest>>);
 
-pub struct SqliteDeinitializer(());
+pub struct SqliteDeinitializer(Arc<UnboundedSender<SqliteRequest>>);
 impl Drop for SqliteDeinitializer {
     fn drop(&mut self) {
         log::debug!("requesting to close sqlite cache");
-        _ = SENDER
-            .get()
-            .expect("sqlite was closed before being initialised")
-            .send(SqliteRequest::Shutdown);
+        _ = self.0.send(SqliteRequest::Shutdown);
     }
 }
 
-pub fn init() -> Result<SqliteDeinitializer> {
+pub fn init() -> Result<(SqliteContext, SqliteDeinitializer)> {
     let connection = Connection::open(utils::DATA_DIR.join("cache.sqlite"))?;
     let (sender, mut receiver) = unbounded_channel();
-    SENDER
-        .set(Arc::new(sender))
-        .expect("double sqlite initialization");
+    let sender = Arc::new(sender);
     std::thread::spawn(move || {
         log::debug!("initialized sqlite cache");
         loop {
@@ -87,13 +83,16 @@ pub fn init() -> Result<SqliteDeinitializer> {
             }
         }
     });
-    Ok(SqliteDeinitializer(()))
+    Ok((SqliteContext(sender.clone()), SqliteDeinitializer(sender)))
 }
 
-pub fn execute(query: impl Into<StringLike>, params: Box<[Box<dyn ToSql + Send>]>) {
-    SENDER
-        .get()
-        .expect("async-sqlite should have been initialized byy now")
+pub fn execute(
+    context: &SqliteContext,
+    query: impl Into<StringLike>,
+    params: Box<[Box<dyn ToSql + Send>]>,
+) {
+    context
+        .0
         .send(SqliteRequest::Execute {
             query: query.into(),
             params,
@@ -104,14 +103,14 @@ pub fn execute(query: impl Into<StringLike>, params: Box<[Box<dyn ToSql + Send>]
 
 /// returns the number of rows changed
 pub async fn await_execute(
+    context: &SqliteContext,
     query: impl Into<StringLike>,
     params: Box<[Box<dyn ToSql + Send>]>,
 ) -> Result<usize> {
     // if async-sqlite was closed, the application is about to exit anyway.
     let (sender, mut receiver) = channel(1);
-    SENDER
-        .get()
-        .expect("async-sqlite should have been initialized byy now")
+    context
+        .0
         .send(SqliteRequest::Execute {
             query: query.into(),
             params,
@@ -125,15 +124,15 @@ pub async fn await_execute(
 }
 
 pub async fn await_query<T: Send + 'static, F: Send + 'static + FnOnce(&Row<'_>) -> Result<T>>(
+    context: &SqliteContext,
     query: impl Into<StringLike>,
     params: Box<[Box<dyn ToSql + Send>]>,
     f: F,
 ) -> Result<T> {
     // if async-sqlite was closed, the application is about to exit anyway.
     let (sender, mut receiver) = channel(1);
-    SENDER
-        .get()
-        .expect("async-sqlite should have been initialized byy now")
+    context
+        .0
         .send(SqliteRequest::Query {
             query: query.into(),
             params,
