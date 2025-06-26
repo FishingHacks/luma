@@ -3,7 +3,7 @@
 A tool for "yes" [running .desktop files, searching and indexing the file system, conversions, etc.]
 
 > [!NOTE]
-> **DISCLAIMER:** This should be considered very early alpha for now.
+> **DISCLAIMER:** This should be considered very early beta for now.
 
 > [!CAUTION]
 > When running lua plugins, they will have **full and unrestricted access** to your system, within the confinement of a non-root userspace application.
