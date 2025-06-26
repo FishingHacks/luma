@@ -6,12 +6,6 @@ A tool for "yes" [running .desktop files, searching and indexing the file system
 > **DISCLAIMER:** This should be considered very early alpha for now.
 
 > [!CAUTION]
-> Due to default hardcoded config in [`src/main.rs`](./src/main.rs), upon first running the application, **it will index your entire home directory ($HOME) and watch it**, with exceptions to hidden files (files starting with a `.`, files named `node_modules` and files named `target`).
->
-> To stop this from happening, either remove this from the default config by commenting out the `FileWatcherEntry` value in the `CONFIG` global in  [`src/main.rs`](./src/main.rs)
-> or disable the files plugin by removing the line `state.add_plugin::<FilePlugin>();`.
-
-> [!CAUTION]
 > When running lua plugins, they will have **full and unrestricted access** to your system, within the confinement of a non-root userspace application.
 > This means that they **can harm your system**. Only run lua plugins from trusted sources or verify them working correctly beforehand!
 
@@ -50,6 +44,12 @@ Development Dependencies:
 - rust toolchain 1.85.0
 
 # Screenshots
+
+![Application Launcher (Theme: Oxocarbon)](./.data/screenshots/application_launch_oxocarbon.png)
+- Application Launcher (Theme: Oxocarbon)
+
+![File Search (Theme: Gruvbox Dark)](./.data/screenshots/file_search_gruvbox_dark.png)
+- File Search (Theme: Gruvbox Dark)
 
 ![Theme Selector (Theme: Dracula)](./.data/screenshots/theme_selection_dracula.png)
 - Theme selector (Theme: Dracula)

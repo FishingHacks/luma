@@ -146,6 +146,7 @@ fn run_thread(
         let mut prev_file_msg = None;
         let mut prev_event = None;
         let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
             .build()
             .expect("this should never fail");
         rt.block_on(async move {
