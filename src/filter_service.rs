@@ -153,7 +153,7 @@ impl CollectorController {
 
     pub(crate) fn init(&mut self, ctx: Context) {
         match self.sender.try_send(Action::Context(ctx)) {
-            Ok(_) => {}
+            Ok(()) => {}
             Err(e) if e.is_full() => {
                 unreachable!("the channel should never be full at the first message")
             }

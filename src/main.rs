@@ -4,12 +4,7 @@
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::unreadable_literal)]
 use std::{
-    borrow::Cow,
-    collections::BTreeMap,
-    ffi::OsStr,
-    fmt::Debug,
-    path::Path,
-    sync::{Arc, LazyLock},
+    borrow::Cow, collections::BTreeMap, ffi::OsStr, fmt::Debug, path::Path, sync::Arc,
     time::Duration,
 };
 
@@ -70,7 +65,8 @@ use tokio::sync::{
     RwLock, mpsc::Sender as TokioSender, mpsc::UnboundedSender, mpsc::channel as bounded,
 };
 
-pub static CONFIG: LazyLock<Arc<Config>> = LazyLock::new(|| {
+#[must_use]
+pub fn make_config() -> Config {
     Config {
         files: Files {
             entries: vec![
@@ -102,8 +98,7 @@ pub static CONFIG: LazyLock<Arc<Config>> = LazyLock::new(|| {
         keybind: "Alt+P".into(),
         enabled_plugins: vec![],
     }
-    .into()
-});
+}
 
 #[derive(Clone)]
 pub struct Context {
@@ -139,6 +134,7 @@ pub enum Message {
     KeyPressed(Key, Modifiers),
     ShowActions,
     GetContext(TokioSender<Context>),
+    UpdateConfig(Arc<Config>),
     HideActions,
     Blurred,
     OpenSpecial(SpecialWindowState),
@@ -160,10 +156,10 @@ pub struct State {
     collector_controller: Option<CollectorController>,
     showing_actions: bool,
     selected_action: usize,
-    on_blur: BlurAction,
     special_windows: BTreeMap<window::Id, SpecialWindowState>,
     lua: Lua,
     context: Context,
+    config: Arc<Config>,
 }
 
 const ALLOWED_ACTION_MODIFIERS: Modifiers = Modifiers::COMMAND
@@ -250,9 +246,6 @@ pub fn format_key(key: &Key, modifiers: Modifiers, s: &mut String) {
         s.push_str("Ctrl + ");
     }
     if Modifiers::ALT.intersects(modifiers) {
-        #[cfg(target_os = "macos")]
-        s.push_str("Alt + ");
-        #[cfg(not(target_os = "macos"))]
         s.push_str("Alt + ");
     }
     if Modifiers::LOGO.intersects(modifiers) {
@@ -666,7 +659,7 @@ impl State {
                     window::resize(window_id, Size::new(size.width, new_height))
                 });
             }
-            Message::Blurred => match self.on_blur {
+            Message::Blurred => match self.config.on_blur {
                 BlurAction::Refocus => return window::gain_focus(window_id),
                 BlurAction::Hide => return Task::done(Message::HideMainWindow),
                 BlurAction::None => {}
@@ -681,6 +674,7 @@ impl State {
             | Message::Exit
             | Message::IndexerMessage(_)
             | Message::GetContext(_)
+            | Message::UpdateConfig(_)
             | Message::CollectorMessage(CollectorMessage::Ready(_)) => unreachable!(),
         }
         if self.selected < self.offset {
@@ -827,9 +821,19 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 ))
                 .expect("this should never fail :3");
             sender
-                .send(FileIndexMessage::SetConfig(CONFIG.clone()))
+                .send(FileIndexMessage::SetConfig(state.config.clone()))
                 .expect("this should never fail :3");
             state.index_sender = Some(sender);
+            Task::none()
+        }
+        Message::UpdateConfig(cfg) => {
+            state.config = cfg;
+            if let Some(sender) = state.index_sender.as_ref() {
+                // it is fine to ignore this result because if the file indexing stopped, some
+                // error occurred and there's no need to spam the console for no reason, the error
+                // will already have produced an error message
+                _ = sender.send(FileIndexMessage::SetConfig(state.config.clone()));
+            }
             Task::none()
         }
         Message::GetContext(sender) => {
@@ -908,7 +912,6 @@ fn main() -> iced::Result {
                 collector_controller: None,
                 showing_actions: false,
                 selected_action: 0,
-                on_blur: BlurAction::Refocus,
                 special_windows: BTreeMap::new(),
                 lua: lua.clone(),
                 context: Context {
@@ -916,6 +919,7 @@ fn main() -> iced::Result {
                     file_index: Arc::new(RwLock::new(FileIndex::new())),
                     sqlite: sqlite.clone(),
                 },
+                config: make_config().into(),
             };
             state.add_plugin::<ControlPlugin>();
             state.add_plugin::<ThemePlugin>();

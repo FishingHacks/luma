@@ -73,7 +73,7 @@ pub struct HTTPResponse {
 pub struct HTTPCache {
     default_ttl: Duration,
     in_memory_cache_ttl: Duration,
-    in_memory_cache: RwLock<HashMap<String, Arc<HTTPResponse>>>,
+    in_memory_cache: RwLock<HashMap<String, (Instant, Arc<HTTPResponse>)>>,
     waiting: RwLock<HashMap<String, Vec<Sender<Arc<HTTPResponse>>>>>,
     client: reqwest::Client,
 }
@@ -102,9 +102,9 @@ impl HTTPCache {
         }
         let mut in_memory_cache = reader.in_memory_cache.write().await;
         if let Some(v) = in_memory_cache.get(url.to_str()) {
-            if v.ttl >= SystemTime::now() {
+            if v.1.ttl >= SystemTime::now() {
                 log::debug!("returning {url} from local cache");
-                return v.clone();
+                return v.1.clone();
             }
             in_memory_cache.remove(url.to_str());
         }
@@ -139,11 +139,10 @@ impl HTTPCache {
         .await
         {
             let arc = Arc::new(v);
-            reader
-                .in_memory_cache
-                .write()
-                .await
-                .insert(url.to_string(), arc.clone());
+            reader.in_memory_cache.write().await.insert(
+                url.to_string(),
+                (Instant::now() + reader.in_memory_cache_ttl, arc.clone()),
+            );
             log::debug!("returning {url} from db cache");
             return arc;
         }
@@ -160,11 +159,10 @@ impl HTTPCache {
             log::debug!("fetching {url}");
             let res = reader.run_request(&url, timeout, ttl).await;
             let res = Arc::new(res);
-            reader
-                .in_memory_cache
-                .write()
-                .await
-                .insert(url.to_string(), res.clone());
+            reader.in_memory_cache.write().await.insert(
+                url.to_string(),
+                (Instant::now() + reader.in_memory_cache_ttl, res.clone()),
+            );
             if let Some(v) = reader.waiting.write().await.remove(url.to_str()) {
                 for v in &v {
                     _ = v.try_send(res.clone());
@@ -250,7 +248,7 @@ impl HTTPCache {
         self.in_memory_cache
             .write()
             .await
-            .retain(|_, v| v.ttl >= SystemTime::now());
+            .retain(|_, v| v.0 > Instant::now() && v.1.ttl > SystemTime::now());
     }
 }
 

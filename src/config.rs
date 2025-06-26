@@ -1,5 +1,6 @@
 use std::{
     borrow::Borrow,
+    fmt::{Display, Write},
     ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
@@ -8,7 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScanFilter {
     pub ignore_hidden: bool,
     pub deny_paths: Vec<ArcPath>,
@@ -16,6 +17,39 @@ pub struct ScanFilter {
     pub deny_if_starts: Vec<ArcStr>,
     pub deny_if_ends: Vec<ArcStr>,
     pub deny_if_is: Vec<ArcStr>,
+}
+
+impl Display for ScanFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.ignore_hidden {
+            f.write_str("any hidden files or directories or ones that start with a `.`\n")?;
+        }
+        for deny_path in &self.deny_paths {
+            Display::fmt(&deny_path.display(), f)?;
+            f.write_char('\n')?;
+        }
+        for value in &self.deny_if_contains {
+            f.write_str("any file or directory that contains ")?;
+            f.write_str(value)?;
+            f.write_char('\n')?;
+        }
+        for value in &self.deny_if_ends {
+            f.write_str("any file or directory that ends in ")?;
+            f.write_str(value)?;
+            f.write_char('\n')?;
+        }
+        for value in &self.deny_if_starts {
+            f.write_str("any file or directory that starts with ")?;
+            f.write_str(value)?;
+            f.write_char('\n')?;
+        }
+        for value in &self.deny_if_is {
+            f.write_str("any file or directory whose filename is ")?;
+            f.write_str(value)?;
+            f.write_char('\n')?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for ScanFilter {
@@ -39,7 +73,7 @@ fn default_keybind() -> String {
     "Ctrl+Space".into()
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FileWatcherEntry {
     pub path: ArcPath,
     #[serde(default = "def_false")]
@@ -125,14 +159,14 @@ impl From<&str> for ArcStr {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Files {
     pub entries: Vec<FileWatcherEntry>,
     #[serde(default = "def_false")]
     pub reindex_at_startup: bool,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BlurAction {
     Refocus,
@@ -141,7 +175,7 @@ pub enum BlurAction {
     None,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "Default::default")]
     pub files: Files,
