@@ -221,7 +221,27 @@ async fn main_loop(
         {
             Ok(FileIndexMessage::Reindex(path)) => _ = queue.insert(ArcPath(path)),
             Ok(FileIndexMessage::SetFileIndex(_)) => unreachable!(),
-            Ok(FileIndexMessage::SetConfig(_)) => todo!(),
+            Ok(FileIndexMessage::SetConfig(cfg)) => {
+                let mut writer = index.write().await;
+                for entry in &cfg.files.entries {
+                    if let Some(v) = writer.config.get(&*entry.path) {
+                        if *v == *entry {
+                            continue;
+                        }
+                    }
+                    queue.insert(entry.path.clone());
+                    writer.config.insert(entry.path.0.clone(), entry.clone());
+                }
+                writer
+                    .config
+                    .retain(|k, _| cfg.files.entries.iter().any(|v| v.path.0 == *k));
+                writer.children.retain(|k, _| {
+                    cfg.files
+                        .entries
+                        .iter()
+                        .any(|v| v.path == *k && !queue.contains(k))
+                });
+            }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => return MainLoopResult::Stop,
         }

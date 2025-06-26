@@ -9,7 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct ScanFilter {
     pub ignore_hidden: bool,
     pub deny_paths: Vec<ArcPath>,
@@ -73,12 +73,18 @@ fn default_keybind() -> String {
     "Ctrl+Space".into()
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+fn none<T>() -> Option<T> {
+    None
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FileWatcherEntry {
     pub path: ArcPath,
     #[serde(default = "def_false")]
     pub watch: bool,
+    #[serde(default = "none")]
     pub reindex_every: Option<Duration>,
+    #[serde(default = "<_>::default")]
     pub filter: ScanFilter,
 }
 

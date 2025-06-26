@@ -3,13 +3,10 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::unreadable_literal)]
-use std::{
-    borrow::Cow, collections::BTreeMap, ffi::OsStr, fmt::Debug, path::Path, sync::Arc,
-    time::Duration,
-};
+use std::{borrow::Cow, collections::BTreeMap, ffi::OsStr, fmt::Debug, sync::Arc, time::Duration};
 
 use cache::HTTPCache;
-use config::{BlurAction, Config, FileWatcherEntry, Files, ScanFilter};
+use config::{BlurAction, Config};
 use control_plugin::ControlPlugin;
 use dice_plugin::DicePlugin;
 use fend_plugin::FendPlugin;
@@ -33,6 +30,7 @@ use iced::{
     window::{self, Level, Position, Settings},
 };
 use mlua::Lua;
+use notify::{EventKind, RecursiveMode, Watcher};
 use run_plugin::RunPlugin;
 use search_input::SearchInput;
 use special_windows::SpecialWindowState;
@@ -62,43 +60,48 @@ pub use filter_service::ResultBuilder;
 use plugin::{AnyPlugin, GenericEntry};
 pub use plugin::{CustomData, Entry, Plugin};
 use tokio::sync::{
-    RwLock, mpsc::Sender as TokioSender, mpsc::UnboundedSender, mpsc::channel as bounded,
+    RwLock,
+    mpsc::{
+        Sender as TokioSender, UnboundedSender, channel as bounded, error::TryRecvError,
+        unbounded_channel,
+    },
 };
+use utils::CONFIG_FILE;
 
-#[must_use]
-pub fn make_config() -> Config {
-    Config {
-        files: Files {
-            entries: vec![
-                FileWatcherEntry {
-                    path: Path::new("/home/fishi").into(),
-                    watch: true,
-                    reindex_every: None,
-                    filter: ScanFilter::default(),
-                },
-                // FileWatcherEntry {
-                //     path: Path::new("/").into(),
-                //     watch: false,
-                //     reindex_every: None,
-                //     filter: ScanFilter {
-                //         deny_paths: vec![
-                //             Path::new("/dev").into(),
-                //             Path::new("/proc").into(),
-                //             Path::new("/srv").into(),
-                //             Path::new("/sys").into(),
-                //             Path::new("/lost+found").into(),
-                //         ],
-                //         ..Default::default()
-                //     },
-                // },
-            ],
-            reindex_at_startup: false,
-        },
-        on_blur: BlurAction::Refocus,
-        keybind: "Alt+P".into(),
-        enabled_plugins: vec![],
-    }
-}
+// #[must_use]
+// pub fn make_config() -> Config {
+//     Config {
+//         files: Files {
+//             entries: vec![
+//                 FileWatcherEntry {
+//                     path: Path::new("/home/fishi").into(),
+//                     watch: true,
+//                     reindex_every: None,
+//                     filter: ScanFilter::default(),
+//                 },
+//                 // FileWatcherEntry {
+//                 //     path: Path::new("/").into(),
+//                 //     watch: false,
+//                 //     reindex_every: None,
+//                 //     filter: ScanFilter {
+//                 //         deny_paths: vec![
+//                 //             Path::new("/dev").into(),
+//                 //             Path::new("/proc").into(),
+//                 //             Path::new("/srv").into(),
+//                 //             Path::new("/sys").into(),
+//                 //             Path::new("/lost+found").into(),
+//                 //         ],
+//                 //         ..Default::default()
+//                 //     },
+//                 // },
+//             ],
+//             reindex_at_startup: false,
+//         },
+//         on_blur: BlurAction::Refocus,
+//         keybind: "Alt+P".into(),
+//         enabled_plugins: vec![],
+//     }
+// }
 
 #[derive(Clone)]
 pub struct Context {
@@ -142,6 +145,7 @@ pub enum Message {
 }
 
 pub struct State {
+    hotkey: HotKey,
     search_query: String,
     results: Vec<GenericEntry>,
     selected: usize,
@@ -160,6 +164,7 @@ pub struct State {
     lua: Lua,
     context: Context,
     config: Arc<Config>,
+    manager: Arc<GlobalHotKeyManager>,
 }
 
 const ALLOWED_ACTION_MODIFIERS: Modifiers = Modifiers::COMMAND
@@ -827,12 +832,28 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::UpdateConfig(cfg) => {
+            let Some(hotkey) =
+                keybind::key_and_modifiers_from_str(&cfg.keybind).and_then(keybind::iced_to_hotkey)
+            else {
+                log::error!(
+                    "failed to load config: {:?} is not a valid keybind",
+                    cfg.keybind
+                );
+                return Task::none();
+            };
             state.config = cfg;
             if let Some(sender) = state.index_sender.as_ref() {
                 // it is fine to ignore this result because if the file indexing stopped, some
                 // error occurred and there's no need to spam the console for no reason, the error
                 // will already have produced an error message
                 _ = sender.send(FileIndexMessage::SetConfig(state.config.clone()));
+            }
+            state.hotkey = hotkey;
+            if let Err(e) = state.manager.unregister(state.hotkey) {
+                log::error!("failed to unregister hotkey: {e}");
+            }
+            if let Err(e) = state.manager.register(hotkey) {
+                log::error!("failed to register hotkey: {e}");
             }
             Task::none()
         }
@@ -877,10 +898,47 @@ const fn make_hotkey(mods: HKModifiers, key: Code) -> HotKey {
 }
 
 static HOTKEY: HotKey = make_hotkey(HKModifiers::ALT, Code::KeyP);
+const DEFAULT_CONFIG: &str = "keybind = \"ctrl+space\"";
+
+fn load_config() -> Option<Config> {
+    let content = match std::fs::read_to_string(&*CONFIG_FILE) {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // default config :3
+            _ = std::fs::create_dir_all(CONFIG_FILE.parent().unwrap());
+            _ = std::fs::write(&*CONFIG_FILE, DEFAULT_CONFIG);
+            DEFAULT_CONFIG.to_string()
+        }
+        Err(e) => {
+            log::error!("failed to load config: {e}");
+            return None;
+        }
+    };
+    match toml::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("failed to load config: {e}");
+            None
+        }
+    }
+}
 
 fn main() -> iced::Result {
     logging::init();
     log::info!("--- New Run ---");
+    let Some(config) = load_config() else {
+        return Ok(());
+    };
+    let config = Arc::new(config);
+    let Some(hotkey) =
+        keybind::key_and_modifiers_from_str(&config.keybind).and_then(keybind::iced_to_hotkey)
+    else {
+        log::error!(
+            "failed to load hotkey: {:?} is not a valid keybind",
+            config.keybind
+        );
+        return Ok(());
+    };
     let (sqlite, sqlite_deinitializer) = sqlite::init().expect("failed to initialize sqlite");
     let lua = match lua::setup_runtime() {
         Ok(v) => v,
@@ -891,8 +949,9 @@ fn main() -> iced::Result {
     };
     let manager = GlobalHotKeyManager::new().expect("failed to start the hotkey manager");
     manager
-        .register(HOTKEY)
+        .register(hotkey)
         .expect("failed to register the hotkey");
+    let manager = Arc::new(manager);
 
     iced::daemon(
         move || {
@@ -919,7 +978,9 @@ fn main() -> iced::Result {
                     file_index: Arc::new(RwLock::new(FileIndex::new())),
                     sqlite: sqlite.clone(),
                 },
-                config: make_config().into(),
+                config: config.clone(),
+                hotkey,
+                manager: manager.clone(),
             };
             state.add_plugin::<ControlPlugin>();
             state.add_plugin::<ThemePlugin>();
@@ -965,10 +1026,10 @@ fn main() -> iced::Result {
                 })
             }),
             cache_clear_sub(),
+            watch_config(),
         ])
     })
     .run()?;
-    drop(manager);
     drop(sqlite_deinitializer);
     Ok(())
 }
@@ -1003,6 +1064,52 @@ fn cache_clear_sub() -> Subscription<Message> {
                 cache::clean_caches(&context).await;
                 tokio::time::sleep(Duration::from_secs(10 * 60)).await;
             }
+        })
+    })
+}
+
+fn watch_config() -> Subscription<Message> {
+    Subscription::run(|| {
+        channel(32, |mut output: Sender<_>| async move {
+            let (sender, mut receiver) = unbounded_channel();
+            let mut watcher =
+                match notify::recommended_watcher(move |ev: Result<notify::Event, _>| {
+                    if let Ok(v) = ev {
+                        if matches!(v.kind, EventKind::Modify(_) | EventKind::Create(_))
+                            && v.paths.contains(&*CONFIG_FILE)
+                        {
+                            _ = sender.send(v);
+                        }
+                    }
+                }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::error!("failed to watch the config: {e}");
+                        return;
+                    }
+                };
+            if let Err(e) =
+                watcher.watch(CONFIG_FILE.parent().unwrap(), RecursiveMode::NonRecursive)
+            {
+                log::error!("failed to watch the config: {e}");
+                return;
+            }
+            loop {
+                let Some(_) = receiver.recv().await else {
+                    break;
+                };
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                loop {
+                    match receiver.try_recv() {
+                        Ok(_) => {}
+                        Err(TryRecvError::Empty) => break,
+                        Err(_) => return,
+                    }
+                }
+                let Some(cfg) = load_config() else { continue };
+                _ = output.send(Message::UpdateConfig(cfg.into())).await;
+            }
+            drop(watcher);
         })
     })
 }
