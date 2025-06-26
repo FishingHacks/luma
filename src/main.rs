@@ -13,10 +13,7 @@ use fend_plugin::FendPlugin;
 use file_index::{FileIndex, FileIndexMessage, FileIndexResponse};
 use file_plugin::FilePlugin;
 use filter_service::{CollectorController, CollectorMessage, ResultBuilderRef};
-use global_hotkey::{
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-    hotkey::{Code, HotKey, Modifiers as HKModifiers},
-};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use iced::{
     Border, Color, Element, Length, Point, Size, Subscription, Task, Theme,
     alignment::{Horizontal, Vertical},
@@ -142,6 +139,7 @@ pub enum Message {
     Blurred,
     OpenSpecial(SpecialWindowState),
     IndexerMessage(FileIndexResponse),
+    HotkeyPressed(GlobalHotKeyEvent),
 }
 
 pub struct State {
@@ -680,6 +678,7 @@ impl State {
             | Message::IndexerMessage(_)
             | Message::GetContext(_)
             | Message::UpdateConfig(_)
+            | Message::HotkeyPressed(_)
             | Message::CollectorMessage(CollectorMessage::Ready(_)) => unreachable!(),
         }
         if self.selected < self.offset {
@@ -884,20 +883,19 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             state.special_windows.insert(id, window_state);
             task.map(|_| Message::None)
         }
+        Message::HotkeyPressed(ev) => {
+            if ev.state() == HotKeyState::Pressed && ev.id == state.hotkey.id {
+                Task::done(Message::Show)
+            } else {
+                Task::none()
+            }
+        }
         _ if state.window.is_none() => Task::none(),
         _ => state.update(message),
     }
 }
 
-const fn make_hotkey(mods: HKModifiers, key: Code) -> HotKey {
-    HotKey {
-        mods,
-        key,
-        id: (mods.bits() << 16) | key as u32,
-    }
-}
-
-static HOTKEY: HotKey = make_hotkey(HKModifiers::ALT, Code::KeyP);
+// static HOTKEY: HotKey = make_hotkey(HKModifiers::ALT, Code::KeyP);
 const DEFAULT_CONFIG: &str = "keybind = \"ctrl+space\"";
 
 fn load_config() -> Option<Config> {
@@ -1009,13 +1007,7 @@ fn main() -> iced::Result {
                 window::Event::Closed => Message::Hide(ev.0),
                 _ => Message::None,
             }),
-            hotkey_sub().map(|ev| {
-                if ev.state() == HotKeyState::Pressed && ev.id == HOTKEY.id {
-                    Message::Show
-                } else {
-                    Message::None
-                }
-            }),
+            hotkey_sub().map(Message::HotkeyPressed),
             Subscription::run(file_index::file_index_service).map(Message::IndexerMessage),
             Subscription::run(filter_service::collector).map(Message::CollectorMessage),
             Subscription::run(|| {
