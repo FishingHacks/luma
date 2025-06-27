@@ -24,7 +24,7 @@ use iced::{
     mouse::ScrollDelta,
     stream::channel,
     widget::{MouseArea, button, column, container, mouse_area, row, stack, text, text_input},
-    window::{self, Level, Settings},
+    window::{self, Level, Position, Settings},
 };
 use mlua::Lua;
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -775,6 +775,12 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 resizable: false,
                 decorations: false,
                 level: Level::AlwaysOnTop,
+                position: Position::SpecificWith(|winsize, resolution| {
+                    Point::new(
+                        (resolution.width - winsize.width).max(0.0) / 2.0,
+                        (resolution.height - BASE_SIZE - 12.0 * ENTRY_SIZE).max(0.0) / 2.0,
+                    )
+                }),
                 ..Default::default()
             };
             settings.size.height = BASE_SIZE;
@@ -784,24 +790,9 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             let old_window = state.window.replace(id);
             state.init_plugins();
             let focus_task = text_input::focus(state.text_input.clone()).map(|()| Message::None);
-            let position_task = window::get_position(id).and_then(move |pos| {
-                window::move_to(
-                    id,
-                    // max_window_size = BASE_SIZE + 12 * ENTRY_SIZE
-                    // max_window_size/2 = (BASE_SIZE + 12 * ENTRY_SIZE)/2 = BASE_SIZE/2 + 12 *
-                    // ENTRY_SIZE/2 = BASE_SIZE/2 + 6 * ENTRY_SIZE
-                    // y - max_window_size/2
-                    Point::new(pos.x, pos.y - BASE_SIZE / 2.0 - 6.0 * ENTRY_SIZE),
-                )
-            });
             match old_window {
-                Some(id) => Task::batch([
-                    window::close(id),
-                    open_window_task,
-                    focus_task,
-                    position_task,
-                ]),
-                None => Task::batch([open_window_task, focus_task, position_task]),
+                Some(id) => Task::batch([window::close(id), open_window_task, focus_task]),
+                None => Task::batch([open_window_task, focus_task]),
             }
         }
         Message::Hide(window_id) => {
