@@ -80,3 +80,10 @@ Measured in Release mode:
 - Indexing / (~320310 files and directories): 7.797s
 - Queries with ~24000 files, 65 .desktop files, around 25ms
 - Queries with ~320334 files, 65 .desktop files, around 190ms
+
+# Known Bugs
+
+> On wayland, the window centers around it's collapsed size (size with no entries). This is due to winit/iced not supporting setting the window position on wayland.
+> See [`iced#1440`](https://github.com/iced-rs/iced/pull/1440), [`iced#1287`](https://github.com/iced-rs/iced/issues/1287)
+>
+> Possible Fix: Set the window size to the maximum window size initially and then set the window size to the correct one, which should hopefully not cause any issues.
