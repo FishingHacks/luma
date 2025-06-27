@@ -761,10 +761,10 @@ const ACTION_BAR_SIZE: f32 = 31.0;
 const BASE_SIZE: f32 = SEARCH_SIZE + ACTION_BAR_SIZE;
 
 fn daemon_view(state: &State, id: window::Id) -> Element<'_, Message> {
-    if let Some(main_window_id) = state.window {
-        if id == main_window_id {
-            return state.view().into();
-        }
+    if let Some(main_window_id) = state.window
+        && id == main_window_id
+    {
+        return state.view().into();
     }
     if let Some(state) = state.special_windows.get(&id) {
         return state.view(id);
@@ -1066,12 +1066,11 @@ fn watch_config() -> Subscription<Message> {
             let (sender, mut receiver) = unbounded_channel();
             let mut watcher =
                 match notify::recommended_watcher(move |ev: Result<notify::Event, _>| {
-                    if let Ok(v) = ev {
-                        if matches!(v.kind, EventKind::Modify(_) | EventKind::Create(_))
-                            && v.paths.contains(&*CONFIG_FILE)
-                        {
-                            _ = sender.send(v);
-                        }
+                    if let Ok(v) = ev
+                        && matches!(v.kind, EventKind::Modify(_) | EventKind::Create(_))
+                        && v.paths.contains(&*CONFIG_FILE)
+                    {
+                        _ = sender.send(v);
                     }
                 }) {
                     Ok(v) => v,

@@ -225,10 +225,10 @@ async fn main_loop(
             Ok(FileIndexMessage::SetConfig(cfg)) => {
                 let mut writer = index.write().await;
                 for entry in &cfg.files.entries {
-                    if let Some(v) = writer.config.get(&*entry.path) {
-                        if *v == *entry {
-                            continue;
-                        }
+                    if let Some(v) = writer.config.get(&*entry.path)
+                        && *v == *entry
+                    {
+                        continue;
                     }
                     queue.insert(entry.path.clone());
                     writer.config.insert(entry.path.0.clone(), entry.clone());
@@ -311,10 +311,10 @@ async fn main_loop(
                     };
                     let path = ArcPath((&**path).into());
                     if data.paths.insert(path.clone()) && kind == CreateKind::Folder {
-                        if data.watched {
-                            if let Err(e) = watcher.watch(&path, RecursiveMode::NonRecursive) {
-                                log::debug!("cannot watch path {}: {e:?}", path.display());
-                            }
+                        if data.watched
+                            && let Err(e) = watcher.watch(&path, RecursiveMode::NonRecursive)
+                        {
+                            log::debug!("cannot watch path {}: {e:?}", path.display());
                         }
                         data.directories.insert(path);
                     }
@@ -331,10 +331,10 @@ async fn main_loop(
                     if !data.directories.remove(&**path) {
                         continue;
                     }
-                    if let Err(e) = watcher.unwatch(path) {
-                        if !matches!(e.kind, ErrorKind::WatchNotFound) {
-                            log::debug!("Failed to unwatch {}: {e:?}", path.display());
-                        }
+                    if let Err(e) = watcher.unwatch(path)
+                        && !matches!(e.kind, ErrorKind::WatchNotFound)
+                    {
+                        log::debug!("Failed to unwatch {}: {e:?}", path.display());
                     }
                 }
             }

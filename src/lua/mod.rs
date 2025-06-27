@@ -125,10 +125,10 @@ impl Plugin for LuaPlugin {
     }
 
     fn init(&mut self, context: Context) {
-        if let Some(ref f) = self.init {
-            if let Err(e) = f.call::<Value>((&self.me, ContextUserData(context))) {
-                log::error!("In {}.lua: {e}", self.prefix);
-            }
+        if let Some(ref f) = self.init
+            && let Err(e) = f.call::<Value>((&self.me, ContextUserData(context)))
+        {
+            log::error!("In {}.lua: {e}", self.prefix);
         }
     }
 

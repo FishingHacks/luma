@@ -325,7 +325,7 @@ impl<'a, Eeper: Future, F: Future + Unpin> Future for Joinall<'a, '_, Eeper, F> 
         if self.0.is_empty() || self.1.as_mut().poll(cx).is_ready() {
             Poll::Ready(JoinAllResult::Done(std::mem::take(&mut self.0)))
         } else if pin!(&mut self.2).poll(cx).is_ready() {
-            return Poll::Ready(JoinAllResult::Abort);
+            Poll::Ready(JoinAllResult::Abort)
         } else {
             Poll::Pending
         }
