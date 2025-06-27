@@ -547,6 +547,7 @@ impl State {
                         window::get_size(window_id).then(move |size| {
                             window::resize(window_id, Size::new(size.width, BASE_SIZE))
                         }),
+                        Task::done(Message::None),
                     ]);
                 }
                 return task;
@@ -557,9 +558,12 @@ impl State {
                 self.selected = 0;
                 self.hide_actions();
                 if self.search_query.is_empty() {
-                    return window::get_size(window_id).then(move |size| {
-                        window::resize(window_id, Size::new(size.width, BASE_SIZE))
-                    });
+                    return Task::batch([
+                        window::get_size(window_id).then(move |size| {
+                            window::resize(window_id, Size::new(size.width, BASE_SIZE))
+                        }),
+                        Task::done(Message::None),
+                    ]);
                 }
             }
             Message::KeyPressed(key, modifiers) => {
@@ -631,9 +635,12 @@ impl State {
                 self.results = results;
                 let new_height =
                     self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE + BASE_SIZE;
-                return window::get_size(window_id).then(move |size| {
-                    window::resize(window_id, Size::new(size.width, new_height))
-                });
+                return Task::batch([
+                    window::get_size(window_id).then(move |size| {
+                        window::resize(window_id, Size::new(size.width, new_height))
+                    }),
+                    Task::done(Message::None),
+                ]);
             }
             Message::ShowActions => {
                 if self.results.is_empty() {
@@ -649,18 +656,24 @@ impl State {
                     let new_height = self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE
                         + BASE_SIZE
                         + actions.len() as f32 * ACTION_SIZE;
-                    return window::get_size(window_id).then(move |size| {
-                        window::resize(window_id, Size::new(size.width, new_height))
-                    });
+                    return Task::batch([
+                        window::get_size(window_id).then(move |size| {
+                            window::resize(window_id, Size::new(size.width, new_height))
+                        }),
+                        Task::done(Message::None),
+                    ]);
                 }
             }
             Message::HideActions => {
                 self.hide_actions();
                 let new_height =
                     self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE + BASE_SIZE;
-                return window::get_size(window_id).then(move |size| {
-                    window::resize(window_id, Size::new(size.width, new_height))
-                });
+                return Task::batch([
+                    window::get_size(window_id).then(move |size| {
+                        window::resize(window_id, Size::new(size.width, new_height))
+                    }),
+                    Task::done(Message::None),
+                ]);
             }
             Message::Blurred => match self.config.on_blur {
                 BlurAction::Refocus => return window::gain_focus(window_id),
