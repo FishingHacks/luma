@@ -41,6 +41,8 @@ pub fn init() {
         .filter_module("iced_wgpu", LevelFilter::Warn)
         .parse_default_env()
         .build();
+    println!("Trying to create log file '{}'", LOG_FILE.display());
+    std::fs::create_dir_all(LOG_FILE.parent().expect("this has to be true")).unwrap();
     let file = OpenOptions::new()
         .append(true)
         .create(true)
