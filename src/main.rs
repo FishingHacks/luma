@@ -264,12 +264,10 @@ pub fn format_key(key: &Key, modifiers: Modifiers, s: &mut String) {
             #[cfg(target_os = "windows")]
             s.push_str("Win");
             #[cfg(target_os = "macos")]
-            s.push_str(" Cmd");
+            s.push_str("Cmd");
             #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             s.push_str("Super");
         }
-        Key::Named(Named::Enter) => s.push_str("↵  Enter"),
-        Key::Named(Named::Backspace) => s.push_str("← Backspace"),
         Key::Named(named) => write!(s, "{named:?}").expect("write-to-str-fail"),
         Key::Character(c) => s.push_str(c.as_str()),
         Key::Unidentified => s.push_str("unknown key"),
