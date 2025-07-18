@@ -101,7 +101,7 @@ impl ResultBuilder {
 
 enum Action {
     Stop,
-    Start(Arc<Vec<Box<dyn AnyPlugin>>>, String, Arc<AtomicBool>),
+    Start(Box<[Arc<dyn AnyPlugin>]>, String, Arc<AtomicBool>),
     Context(Context),
 }
 
@@ -118,7 +118,7 @@ pub struct CollectorController {
 }
 
 impl CollectorController {
-    pub fn start(&mut self, plugins: Arc<Vec<Box<dyn AnyPlugin>>>, query: String) -> bool {
+    pub fn start(&mut self, plugins: Box<[Arc<dyn AnyPlugin>]>, query: String) -> bool {
         self.stop();
         self.stop = Arc::default();
         match self

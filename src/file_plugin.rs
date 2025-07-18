@@ -64,7 +64,7 @@ impl Plugin for FilePlugin {
         builder.commit(iter).await;
     }
 
-    fn init(&mut self, _: Context) {}
+    async fn init(&mut self, _: Context) {}
 
     fn handle_pre(&self, thing: CustomData, action: &str, _: Context) -> Task<Message> {
         let path = thing.into::<Arc<Path>>();

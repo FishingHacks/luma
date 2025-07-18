@@ -76,7 +76,7 @@ pub fn run_cmd(mut cmd: Command) {
         .stderr(Stdio::null())
         .spawn()
     {
-        Ok(_) => log::trace!("Running {cmd:?}"),
+        Ok(_) => log::debug!("Running {cmd:?}"),
         Err(e) => log::warn!("Failed to run {cmd:?}: {e:?}"),
     }
 }
@@ -117,6 +117,7 @@ pub fn open_link(file: impl AsRef<OsStr>) {
 }
 pub fn open_file(file: impl Into<Arc<Path>>) {
     let file = file.into();
+    log::debug!("opening {}", file.display());
     let mut cmd = Command::new("xdg-mime");
     cmd.arg("query").arg("filetype").arg(&*file);
     std::thread::spawn(move || {

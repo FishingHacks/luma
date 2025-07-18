@@ -43,7 +43,7 @@ impl Plugin for DicePlugin {
         builder.commit(entries.into_iter()).await;
     }
 
-    fn init(&mut self, _: crate::Context) {}
+    async fn init(&mut self, _: crate::Context) {}
 
     fn handle_pre(
         &self,

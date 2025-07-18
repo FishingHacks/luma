@@ -38,7 +38,7 @@ impl Plugin for ThemePlugin {
         builder.commit(iter).await;
     }
 
-    fn init(&mut self, _: Context) {}
+    async fn init(&mut self, _: Context) {}
 
     fn handle_pre(&self, thing: CustomData, _: &str, _: Context) -> iced::Task<Message> {
         Task::done(Message::ChangeTheme(thing.into::<Theme>()))

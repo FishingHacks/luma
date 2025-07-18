@@ -48,13 +48,18 @@ impl Plugin for RunPlugin {
         builder.commit(iter).await;
     }
 
-    fn init(&mut self, _: Context) {
+    async fn init(&mut self, _: Context) {
         let mut file_entries = Vec::new();
         let mut programs = HashSet::new();
         for dir in utils::APPLICATION_DIRS.iter() {
-            let Ok(dirent) = dir.read_dir() else { continue };
-            for entry in dirent {
-                let Ok(entry) = entry else { continue };
+            let Ok(mut dirent) = tokio::fs::read_dir(dir).await else {
+                continue;
+            };
+            loop {
+                let Ok(entry) = dirent.next_entry().await else {
+                    continue;
+                };
+                let Some(entry) = entry else { break };
                 let path = entry.path();
                 let Ok(contents) = std::fs::read_to_string(&path) else {
                     continue;

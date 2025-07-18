@@ -242,7 +242,7 @@ pub trait Plugin: Send + Sync {
         input: Arc<MatcherInput>,
         builder: ResultBuilderRef<'_>,
         context: Context,
-    ) -> impl std::future::Future<Output = ()> + std::marker::Send {
+    ) -> impl Future<Output = ()> + Send {
         async move { self.get_for_values(&input, builder, context).await }
     }
     fn get_for_values(
@@ -250,8 +250,8 @@ pub trait Plugin: Send + Sync {
         input: &MatcherInput,
         builder: ResultBuilderRef<'_>,
         context: Context,
-    ) -> impl std::future::Future<Output = ()> + std::marker::Send;
-    fn init(&mut self, context: Context);
+    ) -> impl Future<Output = ()> + Send;
+    fn init(&mut self, context: Context) -> impl Future<Output = ()> + Send;
     #[allow(unused_variables)]
     fn handle_pre(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {
         Task::none()
@@ -309,7 +309,7 @@ pub trait AnyPlugin: Send + Sync {
         plugin_id: usize,
         context: Context,
     ) -> BoxFuture<'future, ()>;
-    fn any_init(&mut self, context: Context);
+    fn any_init<'future>(&'future mut self, context: Context) -> BoxFuture<'future, ()>;
     fn any_handle_pre(&self, thing: CustomData, action: &str, context: Context) -> Task<Message>;
     fn any_handle_post(&self, thing: CustomData, action: &str, context: Context) -> Task<Message>;
 }
@@ -337,8 +337,8 @@ impl<T: Plugin + 'static> AnyPlugin for T {
         Box::pin(self.get_for_values_arc(input, builder, context))
     }
 
-    fn any_init(&mut self, context: Context) {
-        self.init(context);
+    fn any_init<'future>(&'future mut self, context: Context) -> BoxFuture<'future, ()> {
+        Box::pin(self.init(context))
     }
 
     fn any_handle_pre(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {

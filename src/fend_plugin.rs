@@ -35,10 +35,11 @@ static CURRENCIES: LazyLock<RwLock<HashMap<String, f64>>> = LazyLock::new(<_>::d
 
 struct ExchangeRateHandler;
 
-impl fend_core::ExchangeRateFn for ExchangeRateHandler {
+impl fend_core::ExchangeRateFnV2 for ExchangeRateHandler {
     fn relative_to_base_currency(
         &self,
         currency: &str,
+        _: &fend_core::ExchangeRateFnV2Options,
     ) -> Result<f64, Box<dyn std::error::Error + Send + Sync + 'static>> {
         CURRENCIES
             .try_read()
@@ -72,15 +73,10 @@ impl Plugin for FendPlugin {
     ) {
         // for some reason rust doesn't like this block not being here :< [it thinks the writer is
         // being dropped after the await, even tho it gets moved into the drop function?]
-        let result = {
-            let Ok(result) = fend_core::evaluate_with_interrupt(
-                input.input(),
-                &mut *self.0.write().await,
-                &builder,
-            ) else {
-                return;
-            };
-            result
+        let Ok(result) =
+            fend_core::evaluate_with_interrupt(input.input(), &mut *self.0.write().await, &builder)
+        else {
+            return;
         };
         let result = result.get_main_result().trim();
         if result.is_empty() {
@@ -114,10 +110,11 @@ impl Plugin for FendPlugin {
         }
     }
 
-    fn init(&mut self, ctx: crate::Context) {
+    async fn init(&mut self, ctx: crate::Context) {
         self.0
-            .blocking_write()
-            .set_exchange_rate_handler_v1(ExchangeRateHandler);
+            .write()
+            .await
+            .set_exchange_rate_handler_v2(ExchangeRateHandler);
         if !GETTING_CURRENCIES.swap(true, Ordering::Relaxed) {
             tokio::spawn(async move {
                 let res = HTTPCache::get(

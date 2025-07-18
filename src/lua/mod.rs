@@ -124,9 +124,11 @@ impl Plugin for LuaPlugin {
         unreachable!()
     }
 
-    fn init(&mut self, context: Context) {
+    async fn init(&mut self, context: Context) {
         if let Some(ref f) = self.init
-            && let Err(e) = f.call::<Value>((&self.me, ContextUserData(context)))
+            && let Err(e) = f
+                .call_async::<Value>((&self.me, ContextUserData(context)))
+                .await
         {
             log::error!("In {}.lua: {e}", self.prefix);
         }

@@ -3,7 +3,10 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::unreadable_literal)]
-use std::{borrow::Cow, collections::BTreeMap, ffi::OsStr, fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow, collections::BTreeMap, ffi::OsStr, fmt::Debug, hash::Hash, sync::Arc,
+    time::Duration,
+};
 
 use cache::HTTPCache;
 use config::{BlurAction, Config};
@@ -19,18 +22,21 @@ use iced::{
     alignment::{Horizontal, Vertical},
     border::Radius,
     color,
-    futures::{SinkExt, channel::mpsc::Sender},
+    futures::{SinkExt, Stream, channel::mpsc::Sender},
     keyboard::{Key, Modifiers, key::Named},
     mouse::ScrollDelta,
     stream::channel,
-    widget::{MouseArea, button, column, container, mouse_area, row, stack, text, text_input},
+    widget::{
+        MouseArea, button, column, container, mouse_area, row, stack, text, text_input,
+        vertical_space,
+    },
     window::{self, Level, Position, Settings},
 };
 use mlua::Lua;
 use notify::{EventKind, RecursiveMode, Watcher};
 use run_plugin::RunPlugin;
 use search_input::SearchInput;
-use special_windows::SpecialWindowState;
+use special_windows::{SpecialWindowMessage, SpecialWindowState};
 use sqlite::SqliteContext;
 use theme_plugin::ThemePlugin;
 
@@ -56,12 +62,15 @@ mod utils;
 pub use filter_service::ResultBuilder;
 use plugin::{AnyPlugin, GenericEntry};
 pub use plugin::{CustomData, Entry, Plugin};
-use tokio::sync::{
-    RwLock,
-    mpsc::{
-        Sender as TokioSender, UnboundedSender, channel as bounded, error::TryRecvError,
-        unbounded_channel,
+use tokio::{
+    sync::{
+        RwLock,
+        mpsc::{
+            Sender as TokioSender, UnboundedSender, channel as bounded, error::TryRecvError,
+            unbounded_channel,
+        },
     },
+    task::AbortHandle,
 };
 use utils::CONFIG_FILE;
 
@@ -100,17 +109,59 @@ use utils::CONFIG_FILE;
 //     }
 // }
 
+#[derive(Clone, Debug)]
+pub struct MessageSender(Arc<RwLock<UnboundedSender<Message>>>);
+
+impl Hash for MessageSender {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
+impl MessageSender {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Arc::new(RwLock::new(unbounded_channel().0)))
+    }
+
+    /// sends a message if the channel is open and ignores if it it's closed
+    pub async fn send(&self, message: Message) {
+        let _: Result<_, _> = self.0.read().await.send(message);
+    }
+
+    async fn replace(&self, new_sender: UnboundedSender<Message>) {
+        *self.0.write().await = new_sender;
+    }
+}
+
+impl Default for MessageSender {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone)]
 pub struct Context {
     http_cache: Arc<RwLock<HTTPCache>>,
     file_index: Arc<RwLock<FileIndex>>,
     sqlite: SqliteContext,
+    message_sender: MessageSender,
+}
+
+#[derive(Clone)]
+pub struct SharedAnyPlugin(Arc<dyn AnyPlugin>);
+impl Debug for SharedAnyPlugin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[any plugin ")?;
+        f.write_str(self.0.any_prefix())?;
+        f.write_str("]")
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    SpecialWindow(SpecialWindowMessage, window::Id),
     UpdateSearch(String),
     SetSearch(String),
+    AddPlugin(SharedAnyPlugin),
     GoUp,
     GoDown,
     Go10Up,
@@ -136,7 +187,7 @@ pub enum Message {
     GetContext(TokioSender<Context>),
     UpdateConfig(Arc<Config>),
     HideActions,
-    Blurred,
+    Blurred(window::Id),
     OpenSpecial(SpecialWindowState),
     IndexerMessage(FileIndexResponse),
     HotkeyPressed(GlobalHotKeyEvent),
@@ -148,10 +199,10 @@ pub struct State {
     results: Vec<GenericEntry>,
     selected: usize,
     offset: usize,
-    num_entries: usize,
     text_input: text_input::Id,
     window: Option<window::Id>,
-    plugins: Arc<Vec<Box<dyn AnyPlugin>>>,
+    plugins: Vec<Arc<dyn AnyPlugin>>,
+    initializing_plugins: Vec<AbortHandle>,
     plugin_builder: Vec<Box<dyn FnMut() -> Box<dyn AnyPlugin>>>,
     theme: Theme,
     index_sender: Option<UnboundedSender<FileIndexMessage>>,
@@ -306,7 +357,10 @@ fn button_style(selected: bool) -> impl Fn(&Theme, button::Status) -> button::St
     }
 }
 
-fn set_window_height(window_id: window::Id, new_height: f32) -> Task<Message> {
+fn set_window_height(window_id: window::Id, new_height: f32, resize: bool) -> Task<Message> {
+    if !resize {
+        return Task::none();
+    }
     window::get_size(window_id).then(move |size| {
         Task::batch([
             window::resize(window_id, Size::new(size.width, new_height)),
@@ -330,9 +384,17 @@ impl State {
                 .into()
         ])];
 
-        for entry_idx in 0..self.num_entries {
+        for entry_idx in 0..NUM_ENTRIES {
             let index = entry_idx + self.offset;
             if index >= self.results.len() {
+                if !self.config.auto_resize {
+                    col = col.push(
+                        vertical_space()
+                            .height(Length::Fixed(ENTRY_SIZE))
+                            .width(Length::Fill),
+                    );
+                    continue;
+                }
                 break;
             }
             let selected = index == self.selected;
@@ -474,9 +536,10 @@ impl State {
             self.results.clear();
             return;
         }
+
         if let Some(controller) = &mut self.collector_controller {
             controller.start(
-                self.plugins.clone(),
+                self.plugins.as_slice().into(),
                 self.search_query.trim().to_lowercase(),
             );
         } else {
@@ -549,7 +612,10 @@ impl State {
                 self.hide_actions();
                 let task = text_input::move_cursor_to_end(self.text_input.clone());
                 if self.search_query.is_empty() {
-                    return Task::batch([task, set_window_height(window_id, BASE_SIZE)]);
+                    return Task::batch([
+                        task,
+                        set_window_height(window_id, BASE_SIZE, self.config.auto_resize),
+                    ]);
                 }
                 return task;
             }
@@ -559,8 +625,12 @@ impl State {
                 self.selected = 0;
                 self.hide_actions();
                 if self.search_query.is_empty() {
-                    return set_window_height(window_id, BASE_SIZE);
+                    return set_window_height(window_id, BASE_SIZE, self.config.auto_resize);
                 }
+            }
+            Message::AddPlugin(plugin) => {
+                self.plugins.push(plugin.0);
+                self.update_matches();
             }
             Message::KeyPressed(key, modifiers) => {
                 if let Some(action) = self
@@ -600,8 +670,8 @@ impl State {
                 if self.selected < self.offset {
                     self.offset = self.selected;
                 }
-                if self.selected >= self.offset + self.num_entries {
-                    self.offset = self.selected + 1 - self.num_entries;
+                if self.selected >= self.offset + NUM_ENTRIES {
+                    self.offset = self.selected + 1 - NUM_ENTRIES;
                 }
                 return self.run(index, 0);
             }
@@ -609,12 +679,15 @@ impl State {
                 self.search_query.clear();
                 self.results.clear();
                 self.hide_actions();
+                self.initializing_plugins
+                    .iter()
+                    .for_each(AbortHandle::abort);
+                self.initializing_plugins.clear();
                 if let Some(v) = self.collector_controller.as_mut() {
                     v.stop();
                 }
-                if let Some(window) = self.window.take() {
-                    return iced::window::close(window);
-                }
+                self.window = None;
+                return iced::window::close(window_id);
             }
             Message::ChangeTheme(theme) => self.theme = theme,
             Message::InputPress => {
@@ -630,8 +703,8 @@ impl State {
                 self.hide_actions();
                 self.results = results;
                 let new_height =
-                    self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE + BASE_SIZE;
-                return set_window_height(window_id, new_height);
+                    self.results.len().min(NUM_ENTRIES) as f32 * ENTRY_SIZE + BASE_SIZE;
+                return set_window_height(window_id, new_height, self.config.auto_resize);
             }
             Message::ShowActions => {
                 if self.results.is_empty() {
@@ -644,23 +717,30 @@ impl State {
                 if !self.results.is_empty() {
                     self.showing_actions = true;
                     self.selected_action = 0;
-                    let new_height = self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE
-                        + BASE_SIZE
-                        + actions.len() as f32 * ACTION_SIZE;
-                    return set_window_height(window_id, new_height);
+                    let new_height = if self.config.auto_resize {
+                        self.results.len().min(NUM_ENTRIES) as f32 * ENTRY_SIZE + BASE_SIZE
+                    } else {
+                        NORESIZE_BASESIZE
+                    };
+                    let new_height = new_height + actions.len() as f32 * ACTION_SIZE;
+                    return set_window_height(window_id, new_height, true);
                 }
             }
             Message::HideActions => {
                 self.hide_actions();
-                let new_height =
-                    self.results.len().min(self.num_entries) as f32 * ENTRY_SIZE + BASE_SIZE;
-                return set_window_height(window_id, new_height);
+                let new_height = if self.config.auto_resize {
+                    self.results.len().min(NUM_ENTRIES) as f32 * ENTRY_SIZE + BASE_SIZE
+                } else {
+                    NORESIZE_BASESIZE
+                };
+                return set_window_height(window_id, new_height, true);
             }
-            Message::Blurred => match self.config.on_blur {
+            Message::Blurred(id) if id == window_id => match self.config.on_blur {
                 BlurAction::Refocus => return window::gain_focus(window_id),
                 BlurAction::Hide => return Task::done(Message::HideMainWindow),
                 BlurAction::None => {}
             },
+            Message::Blurred(_) => {}
 
             // daemon messages
             Message::Show
@@ -673,13 +753,14 @@ impl State {
             | Message::GetContext(_)
             | Message::UpdateConfig(_)
             | Message::HotkeyPressed(_)
+            | Message::SpecialWindow(..)
             | Message::CollectorMessage(CollectorMessage::Ready(_)) => unreachable!(),
         }
         if self.selected < self.offset {
             self.offset = self.selected;
         }
-        if self.selected >= self.offset + self.num_entries {
-            self.offset = self.selected + 1 - self.num_entries;
+        if self.selected >= self.offset + NUM_ENTRIES {
+            self.offset = self.selected + 1 - NUM_ENTRIES;
         }
         Task::none()
     }
@@ -731,16 +812,56 @@ impl State {
             controller.stop();
         }
         self.results.clear();
-        self.plugins = Arc::new(
-            self.plugin_builder
-                .iter_mut()
-                .map(|v| {
-                    let mut plugin = v();
-                    plugin.any_init(self.context.clone());
-                    plugin
+        self.plugins.clear();
+        for plugin_builder in &mut self.plugin_builder {
+            let mut plugin = plugin_builder();
+            let prefix = plugin.any_prefix();
+            if prefix != "control" && !self.config.enabled_plugins.iter().any(|v| v == prefix) {
+                continue;
+            }
+            let context = self.context.clone();
+            let sender = context.message_sender.clone();
+            self.initializing_plugins.push(
+                tokio::spawn(async move {
+                    plugin.any_init(context).await;
+                    sender
+                        .send(Message::AddPlugin(SharedAnyPlugin(plugin.into())))
+                        .await;
                 })
-                .collect(),
-        );
+                .abort_handle(),
+            );
+        }
+    }
+
+    pub async fn save_config(&self) {
+        let s = match toml::to_string_pretty(&*self.config) {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("Failed to save the config: {e}");
+                return;
+            }
+        };
+        if tokio::fs::create_dir_all(
+            #[allow(clippy::missing_panics_doc)]
+            CONFIG_FILE
+                .parent()
+                .expect("the config file has to have a parent"),
+        )
+        .await
+        .is_err()
+        {
+            log::error!(
+                "Failed to save the config: Failed to create path {}",
+                CONFIG_FILE.display()
+            );
+            return;
+        }
+        if let Err(e) = tokio::fs::write(&*CONFIG_FILE, s).await {
+            log::error!(
+                "Failed to save config: Failed to write {}: {e}",
+                CONFIG_FILE.display()
+            );
+        }
     }
 }
 
@@ -753,6 +874,8 @@ const ENTRY_SIZE: f32 = 56.0;
 const ACTION_SIZE: f32 = 31.0;
 const ACTION_BAR_SIZE: f32 = 31.0;
 const BASE_SIZE: f32 = SEARCH_SIZE + ACTION_BAR_SIZE;
+const NUM_ENTRIES: usize = 10;
+const NORESIZE_BASESIZE: f32 = BASE_SIZE + NUM_ENTRIES as f32 * ENTRY_SIZE;
 
 fn daemon_view(state: &State, id: window::Id) -> Element<'_, Message> {
     if let Some(main_window_id) = state.window
@@ -760,28 +883,40 @@ fn daemon_view(state: &State, id: window::Id) -> Element<'_, Message> {
     {
         return state.view().into();
     }
-    if let Some(state) = state.special_windows.get(&id) {
-        return state.view(id);
+    if let Some(window_state) = state.special_windows.get(&id) {
+        return window_state.view(id, state);
     }
     text(format!("No state was found for this window. {id:?}")).into()
 }
 
 fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
     match message {
+        Message::SpecialWindow(msg, id) => {
+            let Some(mut window_state) = state.special_windows.remove(&id) else {
+                return Task::none();
+            };
+            let task = window_state.update(id, state, msg);
+            state.special_windows.insert(id, window_state);
+            task
+        }
         Message::Show => {
             let mut settings = Settings {
                 resizable: false,
                 decorations: false,
                 level: Level::AlwaysOnTop,
-                position: Position::SpecificWith(|winsize, resolution| {
+                position: Position::Centered,
+                ..Default::default()
+            };
+            settings.size.height = NORESIZE_BASESIZE;
+            if state.config.auto_resize {
+                settings.position = Position::SpecificWith(|winsize, resolution| {
                     Point::new(
                         (resolution.width - winsize.width).max(0.0) / 2.0,
                         (resolution.height - BASE_SIZE - 12.0 * ENTRY_SIZE).max(0.0) / 2.0,
                     )
-                }),
-                ..Default::default()
-            };
-            settings.size.height = BASE_SIZE;
+                });
+                settings.size.height = BASE_SIZE;
+            }
             let (id, open_window_task) = window::open(settings);
             let open_window_task = open_window_task.map(|_| Message::None);
             log::trace!("opened main window with id {id:?}");
@@ -794,6 +929,11 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::Hide(window_id) => {
+            if let Some(id) = state.window
+                && window_id == id
+            {
+                return Task::done(Message::HideMainWindow);
+            }
             state.special_windows.remove(&window_id);
             window::close(window_id)
         }
@@ -841,14 +981,26 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 // will already have produced an error message
                 _ = sender.send(FileIndexMessage::SetConfig(state.config.clone()));
             }
-            state.hotkey = hotkey;
             if let Err(e) = state.manager.unregister(state.hotkey) {
                 log::error!("failed to unregister hotkey: {e}");
             }
             if let Err(e) = state.manager.register(hotkey) {
                 log::error!("failed to register hotkey: {e}");
             }
-            Task::none()
+            state.hotkey = hotkey;
+            let Some(id) = state.window else {
+                return Task::none();
+            };
+            if state.config.auto_resize {
+                let mut new_height =
+                    state.results.len().min(NUM_ENTRIES) as f32 * ENTRY_SIZE + BASE_SIZE;
+                if state.showing_actions {
+                    new_height += state.get_actions().len() as f32 * ACTION_SIZE;
+                }
+                set_window_height(id, new_height, true)
+            } else {
+                set_window_height(id, NORESIZE_BASESIZE, true)
+            }
         }
         Message::GetContext(sender) => {
             // it is fine to ignore the error, because it's either full or disconnected.
@@ -944,6 +1096,8 @@ fn main() -> iced::Result {
         .register(hotkey)
         .expect("failed to register the hotkey");
     let manager = Arc::new(manager);
+    let message_sender = MessageSender::new();
+    let message_sender_subscription = message_sender.clone();
 
     iced::daemon(
         move || {
@@ -953,10 +1107,9 @@ fn main() -> iced::Result {
                 results: Vec::new(),
                 selected: 0,
                 text_input: text_input_id.clone(),
-                num_entries: 10,
                 offset: 0,
                 window: None,
-                plugins: Vec::new().into(),
+                plugins: Vec::new(),
                 plugin_builder: Vec::new(),
                 theme: Theme::Dracula,
                 index_sender: None,
@@ -969,10 +1122,12 @@ fn main() -> iced::Result {
                     http_cache: Arc::new(HTTPCache::new().into()),
                     file_index: Arc::new(RwLock::new(FileIndex::new())),
                     sqlite: sqlite.clone(),
+                    message_sender: message_sender.clone(),
                 },
                 config: config.clone(),
                 hotkey,
                 manager: manager.clone(),
+                initializing_plugins: Vec::new(),
             };
             state.add_plugin::<ControlPlugin>();
             state.add_plugin::<ThemePlugin>();
@@ -994,10 +1149,10 @@ fn main() -> iced::Result {
         daemon_view,
     )
     .theme(|s, _| s.theme.clone())
-    .subscription(|_| {
+    .subscription(move |_| {
         Subscription::batch([
             window::events().map(|ev| match ev.1 {
-                window::Event::Unfocused => Message::Blurred,
+                window::Event::Unfocused => Message::Blurred(ev.0),
                 window::Event::Closed => Message::Hide(ev.0),
                 _ => Message::None,
             }),
@@ -1013,11 +1168,30 @@ fn main() -> iced::Result {
             }),
             cache_clear_sub(),
             watch_config(),
+            Subscription::run_with(message_sender_subscription.clone(), message_sender_handler),
         ])
     })
     .run()?;
     drop(sqlite_deinitializer);
     Ok(())
+}
+
+fn message_sender_handler(message_sender: &MessageSender) -> impl Stream<Item = Message> + use<> {
+    let message_sender = message_sender.clone();
+    channel(32, |mut sender: Sender<_>| async move {
+        let (tx, mut rx) = unbounded_channel();
+        message_sender.replace(tx).await;
+        loop {
+            let Some(v) = rx.recv().await else { return };
+            match sender.send(v).await {
+                Ok(()) => {}
+                Err(e) if e.is_full() => {
+                    log::warn!("Failed to submit message {e:?}: channel is full");
+                }
+                Err(_) => (),
+            }
+        }
+    })
 }
 
 fn hotkey_sub() -> Subscription<GlobalHotKeyEvent> {

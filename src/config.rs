@@ -65,6 +65,10 @@ impl Default for ScanFilter {
     }
 }
 
+fn def_true() -> bool {
+    true
+}
+
 fn def_false() -> bool {
     false
 }
@@ -191,4 +195,6 @@ pub struct Config {
     pub keybind: String,
     #[serde(default = "Vec::new")]
     pub enabled_plugins: Vec<String>,
+    #[serde(default = "def_true")]
+    pub auto_resize: bool,
 }

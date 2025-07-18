@@ -87,37 +87,30 @@ impl Log for Logger {
             self.file.log(record);
         }
         let fmt = record.args();
+
+        let Some(path) = record.module_path() else {
+            return;
+        };
+        if !path.starts_with(CRATE_NAME) {
+            return;
+        }
         match record.level() {
             Level::Error => {
                 let Some(sender) = SENDER.get() else { return };
-                let msg = match record.module_path() {
-                    Some(v) if v.starts_with(CRATE_NAME) => format!("{fmt}"),
-                    None => format!("{fmt}"),
-                    Some(v) => format!("[{v}]: {fmt}"),
-                };
                 (sender.write().expect("failed to write"))(Message::OpenSpecial(
-                    SpecialWindowState::new_error_popup(msg),
+                    SpecialWindowState::new_error_popup(format!("{fmt}")),
                 ));
             }
             Level::Warn => {
                 let Some(sender) = SENDER.get() else { return };
-                let msg = match record.module_path() {
-                    Some(v) if v.starts_with(CRATE_NAME) => format!("{fmt}"),
-                    _ => return,
-                };
                 (sender.write().expect("failed to write"))(Message::OpenSpecial(
-                    SpecialWindowState::new_warning_popup(msg),
+                    SpecialWindowState::new_warning_popup(format!("{fmt}")),
                 ));
             }
             Level::Info => {
-                let Some(path) = record.module_path() else {
-                    return;
-                };
-                if path.starts_with(CRATE_NAME) {
-                    let mut cmd = Command::new("notify-send");
-                    cmd.arg(format!("{fmt}"));
-                    utils::run_cmd(cmd);
-                }
+                let mut cmd = Command::new("notify-send");
+                cmd.arg(format!("{fmt}"));
+                utils::run_cmd(cmd);
             }
             _ => {}
         }
