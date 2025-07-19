@@ -60,7 +60,7 @@ mod sqlite;
 mod theme_plugin;
 mod utils;
 pub use filter_service::ResultBuilder;
-use plugin::{AnyPlugin, GenericEntry};
+use plugin::{AnyPlugin, GenericEntry, StringLike};
 pub use plugin::{CustomData, Entry, Plugin};
 use tokio::{
     sync::{
@@ -144,6 +144,7 @@ pub struct Context {
     file_index: Arc<RwLock<FileIndex>>,
     sqlite: SqliteContext,
     message_sender: MessageSender,
+    config: Arc<Config>,
 }
 
 #[derive(Clone)]
@@ -185,13 +186,15 @@ pub enum Message {
     KeyPressed(Key, Modifiers),
     ShowActions,
     GetContext(TokioSender<Context>),
-    UpdateConfig(Arc<Config>),
+    UpdateConfig(Arc<Config>, bool),
     HideActions,
     Blurred(window::Id),
     OpenSpecial(SpecialWindowState),
     IndexerMessage(FileIndexResponse),
     HotkeyPressed(GlobalHotKeyEvent),
 }
+
+type PluginBuilder = Box<dyn FnMut() -> Box<dyn AnyPlugin>>;
 
 pub struct State {
     hotkey: HotKey,
@@ -203,7 +206,7 @@ pub struct State {
     window: Option<window::Id>,
     plugins: Vec<Arc<dyn AnyPlugin>>,
     initializing_plugins: Vec<AbortHandle>,
-    plugin_builder: Vec<Box<dyn FnMut() -> Box<dyn AnyPlugin>>>,
+    plugin_builder: Vec<(StringLike, PluginBuilder)>,
     theme: Theme,
     index_sender: Option<UnboundedSender<FileIndexMessage>>,
     collector_controller: Option<CollectorController>,
@@ -212,7 +215,6 @@ pub struct State {
     special_windows: BTreeMap<window::Id, SpecialWindowState>,
     lua: Lua,
     context: Context,
-    config: Arc<Config>,
     manager: Arc<GlobalHotKeyManager>,
 }
 
@@ -387,7 +389,7 @@ impl State {
         for entry_idx in 0..NUM_ENTRIES {
             let index = entry_idx + self.offset;
             if index >= self.results.len() {
-                if !self.config.auto_resize {
+                if !self.context.config.auto_resize {
                     col = col.push(
                         vertical_space()
                             .height(Length::Fixed(ENTRY_SIZE))
@@ -614,7 +616,7 @@ impl State {
                 if self.search_query.is_empty() {
                     return Task::batch([
                         task,
-                        set_window_height(window_id, BASE_SIZE, self.config.auto_resize),
+                        set_window_height(window_id, BASE_SIZE, self.context.config.auto_resize),
                     ]);
                 }
                 return task;
@@ -625,7 +627,11 @@ impl State {
                 self.selected = 0;
                 self.hide_actions();
                 if self.search_query.is_empty() {
-                    return set_window_height(window_id, BASE_SIZE, self.config.auto_resize);
+                    return set_window_height(
+                        window_id,
+                        BASE_SIZE,
+                        self.context.config.auto_resize,
+                    );
                 }
             }
             Message::AddPlugin(plugin) => {
@@ -704,7 +710,7 @@ impl State {
                 self.results = results;
                 let new_height =
                     self.results.len().min(NUM_ENTRIES) as f32 * ENTRY_SIZE + BASE_SIZE;
-                return set_window_height(window_id, new_height, self.config.auto_resize);
+                return set_window_height(window_id, new_height, self.context.config.auto_resize);
             }
             Message::ShowActions => {
                 if self.results.is_empty() {
@@ -717,7 +723,7 @@ impl State {
                 if !self.results.is_empty() {
                     self.showing_actions = true;
                     self.selected_action = 0;
-                    let new_height = if self.config.auto_resize {
+                    let new_height = if self.context.config.auto_resize {
                         self.results.len().min(NUM_ENTRIES) as f32 * ENTRY_SIZE + BASE_SIZE
                     } else {
                         NORESIZE_BASESIZE
@@ -728,16 +734,15 @@ impl State {
             }
             Message::HideActions => {
                 self.hide_actions();
-                let new_height = if self.config.auto_resize {
+                let new_height = if self.context.config.auto_resize {
                     self.results.len().min(NUM_ENTRIES) as f32 * ENTRY_SIZE + BASE_SIZE
                 } else {
                     NORESIZE_BASESIZE
                 };
                 return set_window_height(window_id, new_height, true);
             }
-            Message::Blurred(id) if id == window_id => match self.config.on_blur {
+            Message::Blurred(id) if id == window_id => match self.context.config.on_blur {
                 BlurAction::Refocus => return window::gain_focus(window_id),
-                BlurAction::Hide => return Task::done(Message::HideMainWindow),
                 BlurAction::None => {}
             },
             Message::Blurred(_) => {}
@@ -751,7 +756,7 @@ impl State {
             | Message::Exit
             | Message::IndexerMessage(_)
             | Message::GetContext(_)
-            | Message::UpdateConfig(_)
+            | Message::UpdateConfig(..)
             | Message::HotkeyPressed(_)
             | Message::SpecialWindow(..)
             | Message::CollectorMessage(CollectorMessage::Ready(_)) => unreachable!(),
@@ -773,13 +778,17 @@ impl State {
             .map(|v| &**v)
     }
 
-    pub fn add_plugin_instance<T: Plugin + Clone + 'static>(&mut self, value: T) {
+    pub fn add_plugin_instance<T: Plugin + Clone + 'static>(
+        &mut self,
+        value: T,
+        id: impl Into<StringLike>,
+    ) {
         self.plugin_builder
-            .push(Box::new(move || Box::new(value.clone())));
+            .push((id.into(), Box::new(move || Box::new(value.clone()))));
     }
-    pub fn add_plugin<T: Plugin + Default + 'static>(&mut self) {
+    pub fn add_plugin<T: Plugin + Default + 'static>(&mut self, id: impl Into<StringLike>) {
         self.plugin_builder
-            .push(Box::new(|| Box::new(T::default())));
+            .push((id.into(), Box::new(|| Box::new(T::default()))));
     }
     pub fn add_lua_plugins(&mut self) {
         log::debug!("Loading lua plugins...");
@@ -799,7 +808,7 @@ impl State {
             }
             let stem = Arc::<str>::from(stem);
             match lua::load_lua_plugin(&self.lua, path, stem.clone()) {
-                Ok(v) => self.add_plugin_instance(v),
+                Ok(v) => self.add_plugin_instance(v, stem),
                 Err(e) => {
                     log::error!("Failed to load plugin {stem:?}: {e}");
                 }
@@ -813,10 +822,17 @@ impl State {
         }
         self.results.clear();
         self.plugins.clear();
-        for plugin_builder in &mut self.plugin_builder {
+        for plugin_builder in self.plugin_builder.iter_mut().map(|(_, v)| v) {
             let mut plugin = plugin_builder();
             let prefix = plugin.any_prefix();
-            if prefix != "control" && !self.config.enabled_plugins.iter().any(|v| v == prefix) {
+            if prefix != "control"
+                && !self
+                    .context
+                    .config
+                    .enabled_plugins
+                    .iter()
+                    .any(|v| v == prefix)
+            {
                 continue;
             }
             let context = self.context.clone();
@@ -833,21 +849,20 @@ impl State {
         }
     }
 
-    pub async fn save_config(&self) {
-        let s = match toml::to_string_pretty(&*self.config) {
+    pub fn save_config(&self) {
+        let s = match toml::to_string_pretty(&*self.context.config) {
             Ok(v) => v,
             Err(e) => {
                 log::error!("Failed to save the config: {e}");
                 return;
             }
         };
-        if tokio::fs::create_dir_all(
+        if std::fs::create_dir_all(
             #[allow(clippy::missing_panics_doc)]
             CONFIG_FILE
                 .parent()
                 .expect("the config file has to have a parent"),
         )
-        .await
         .is_err()
         {
             log::error!(
@@ -856,7 +871,7 @@ impl State {
             );
             return;
         }
-        if let Err(e) = tokio::fs::write(&*CONFIG_FILE, s).await {
+        if let Err(e) = std::fs::write(&*CONFIG_FILE, s) {
             log::error!(
                 "Failed to save config: Failed to write {}: {e}",
                 CONFIG_FILE.display()
@@ -908,7 +923,7 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 ..Default::default()
             };
             settings.size.height = NORESIZE_BASESIZE;
-            if state.config.auto_resize {
+            if state.context.config.auto_resize {
                 settings.position = Position::SpecificWith(|winsize, resolution| {
                     Point::new(
                         (resolution.width - winsize.width).max(0.0) / 2.0,
@@ -959,12 +974,12 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 ))
                 .expect("this should never fail :3");
             sender
-                .send(FileIndexMessage::SetConfig(state.config.clone()))
+                .send(FileIndexMessage::SetConfig(state.context.config.clone()))
                 .expect("this should never fail :3");
             state.index_sender = Some(sender);
             Task::none()
         }
-        Message::UpdateConfig(cfg) => {
+        Message::UpdateConfig(cfg, save) => {
             let Some(hotkey) =
                 keybind::key_and_modifiers_from_str(&cfg.keybind).and_then(keybind::iced_to_hotkey)
             else {
@@ -974,12 +989,15 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 );
                 return Task::none();
             };
-            state.config = cfg;
+            state.context.config = cfg;
+            if save {
+                state.save_config();
+            }
             if let Some(sender) = state.index_sender.as_ref() {
                 // it is fine to ignore this result because if the file indexing stopped, some
                 // error occurred and there's no need to spam the console for no reason, the error
                 // will already have produced an error message
-                _ = sender.send(FileIndexMessage::SetConfig(state.config.clone()));
+                _ = sender.send(FileIndexMessage::SetConfig(state.context.config.clone()));
             }
             if let Err(e) = state.manager.unregister(state.hotkey) {
                 log::error!("failed to unregister hotkey: {e}");
@@ -991,7 +1009,7 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             let Some(id) = state.window else {
                 return Task::none();
             };
-            if state.config.auto_resize {
+            if state.context.config.auto_resize {
                 let mut new_height =
                     state.results.len().min(NUM_ENTRIES) as f32 * ENTRY_SIZE + BASE_SIZE;
                 if state.showing_actions {
@@ -1123,19 +1141,19 @@ fn main() -> iced::Result {
                     file_index: Arc::new(RwLock::new(FileIndex::new())),
                     sqlite: sqlite.clone(),
                     message_sender: message_sender.clone(),
+                    config: config.clone(),
                 },
-                config: config.clone(),
                 hotkey,
                 manager: manager.clone(),
                 initializing_plugins: Vec::new(),
             };
-            state.add_plugin::<ControlPlugin>();
-            state.add_plugin::<ThemePlugin>();
-            state.add_plugin::<DicePlugin>();
-            state.add_plugin::<FendPlugin>();
-            state.add_plugin::<RunPlugin>();
+            state.add_plugin::<ControlPlugin>(ControlPlugin.prefix());
+            state.add_plugin::<ThemePlugin>(ThemePlugin.prefix());
+            state.add_plugin::<DicePlugin>(DicePlugin.prefix());
+            state.add_plugin::<FendPlugin>(FendPlugin::PREFIX);
+            state.add_plugin::<RunPlugin>(RunPlugin::PREFIX);
             state.add_lua_plugins();
-            state.add_plugin::<FilePlugin>();
+            state.add_plugin::<FilePlugin>(FilePlugin.prefix());
             let focus_task = text_input::focus(text_input_id);
             let http_cache = state.context.http_cache.clone();
             let sqlite = sqlite.clone();
@@ -1266,7 +1284,7 @@ fn watch_config() -> Subscription<Message> {
                     }
                 }
                 let Some(cfg) = load_config() else { continue };
-                _ = output.send(Message::UpdateConfig(cfg.into())).await;
+                _ = output.send(Message::UpdateConfig(cfg.into(), false)).await;
             }
             drop(watcher);
         })

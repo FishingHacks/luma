@@ -49,6 +49,10 @@ impl fend_core::ExchangeRateFnV2 for ExchangeRateHandler {
     }
 }
 
+impl FendPlugin {
+    pub const PREFIX: &str = "fend";
+}
+
 impl Plugin for FendPlugin {
     fn actions(&self) -> &[Action] {
         const {
@@ -62,7 +66,7 @@ impl Plugin for FendPlugin {
     }
 
     fn prefix(&self) -> &'static str {
-        "fend"
+        Self::PREFIX
     }
 
     async fn get_for_values(

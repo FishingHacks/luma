@@ -70,7 +70,7 @@ impl Plugin for ControlPlugin {
 
     async fn init(&mut self, _: crate::Context) {}
 
-    fn handle_pre(&self, thing: CustomData, _: &str, _: crate::Context) -> iced::Task<Message> {
+    fn handle_pre(&self, thing: CustomData, _: &str, ctx: crate::Context) -> iced::Task<Message> {
         match thing.into::<Action>() {
             Action::Quit => Task::done(Message::Exit),
             Action::Hide => Task::none(),
@@ -78,9 +78,9 @@ impl Plugin for ControlPlugin {
                 utils::open_file(&**crate::logging::LOG_FILE);
                 Task::none()
             }
-            Action::OpenSettings => {
-                Task::done(Message::OpenSpecial(SpecialWindowState::settings()))
-            }
+            Action::OpenSettings => Task::done(Message::OpenSpecial(SpecialWindowState::settings(
+                Clone::clone(&*ctx.config),
+            ))),
         }
     }
 

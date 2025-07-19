@@ -123,7 +123,7 @@ pub fn open_file(file: impl Into<Arc<Path>>) {
     std::thread::spawn(move || {
         let output = match cmd.output() {
             Ok(output) if output.status.success() => output.stdout,
-            _ => return,
+            _ => b"text/plain".into(),
         };
         let Ok(output) = str::from_utf8(&output) else {
             return;

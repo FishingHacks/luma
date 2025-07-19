@@ -40,6 +40,27 @@ impl PartialEq for StringLike {
     }
 }
 
+impl PartialEq<StringLike> for String {
+    fn eq(&self, other: &StringLike) -> bool {
+        other.eq(self)
+    }
+}
+impl PartialEq<String> for StringLike {
+    fn eq(&self, other: &String) -> bool {
+        self.to_str() == other
+    }
+}
+impl PartialEq<StringLike> for &str {
+    fn eq(&self, other: &StringLike) -> bool {
+        other.eq(self)
+    }
+}
+impl<'a> PartialEq<&'a str> for StringLike {
+    fn eq(&self, other: &&'a str) -> bool {
+        self.to_str() == *other
+    }
+}
+
 impl Display for StringLike {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.to_str())
@@ -211,6 +232,16 @@ impl From<String> for StringLike {
     }
 }
 
+impl From<StringLike> for String {
+    fn from(value: StringLike) -> Self {
+        match value {
+            StringLike::Owned(s) => s,
+            StringLike::Empty => String::new(),
+            v => v.to_string(),
+        }
+    }
+}
+
 impl<T> From<Option<T>> for StringLike
 where
     StringLike: From<T>,
@@ -309,7 +340,7 @@ pub trait AnyPlugin: Send + Sync {
         plugin_id: usize,
         context: Context,
     ) -> BoxFuture<'future, ()>;
-    fn any_init<'future>(&'future mut self, context: Context) -> BoxFuture<'future, ()>;
+    fn any_init(&mut self, context: Context) -> BoxFuture<'_, ()>;
     fn any_handle_pre(&self, thing: CustomData, action: &str, context: Context) -> Task<Message>;
     fn any_handle_post(&self, thing: CustomData, action: &str, context: Context) -> Task<Message>;
 }
@@ -337,7 +368,7 @@ impl<T: Plugin + 'static> AnyPlugin for T {
         Box::pin(self.get_for_values_arc(input, builder, context))
     }
 
-    fn any_init<'future>(&'future mut self, context: Context) -> BoxFuture<'future, ()> {
+    fn any_init(&mut self, context: Context) -> BoxFuture<'_, ()> {
         Box::pin(self.init(context))
     }
 

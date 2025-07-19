@@ -25,9 +25,13 @@ pub struct RunPlugin {
     files: Vec<FileEntry>,
 }
 
+impl RunPlugin {
+    pub const PREFIX: &str = "run";
+}
+
 impl Plugin for RunPlugin {
     fn prefix(&self) -> &'static str {
-        "run"
+        Self::PREFIX
     }
 
     async fn get_for_values(

@@ -26,7 +26,7 @@ impl Clone for SpecialWindowState {
 }
 
 impl SpecialWindowState {
-    pub fn view(&self, id: window::Id, parent_state: &State) -> Element<'_, Message> {
+    pub fn view<'a>(&'a self, id: window::Id, parent_state: &'a State) -> Element<'a, Message> {
         match self {
             SpecialWindowState::ErrorPopup(state) => state.view(id),
             SpecialWindowState::WarnPopup(state) => state.view(id),
@@ -66,7 +66,7 @@ impl SpecialWindowState {
         Self::WarnPopup(warning_popup::State { message })
     }
 
-    pub(crate) fn settings() -> Self {
-        Self::Settings(settings::SettingsState)
+    pub(crate) fn settings(config: crate::config::Config) -> Self {
+        Self::Settings(settings::SettingsState::new(config))
     }
 }

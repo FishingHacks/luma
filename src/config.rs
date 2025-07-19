@@ -1,5 +1,6 @@
 use std::{
     borrow::Borrow,
+    collections::HashSet,
     fmt::{Display, Write},
     ops::Deref,
     path::{Path, PathBuf},
@@ -169,23 +170,28 @@ impl From<&str> for ArcStr {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct Files {
     pub entries: Vec<FileWatcherEntry>,
     #[serde(default = "def_false")]
     pub reindex_at_startup: bool,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum BlurAction {
     Refocus,
-    Hide,
     #[default]
     None,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+impl Display for BlurAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "Default::default")]
     pub files: Files,
@@ -193,8 +199,8 @@ pub struct Config {
     pub on_blur: BlurAction,
     #[serde(default = "default_keybind")]
     pub keybind: String,
-    #[serde(default = "Vec::new")]
-    pub enabled_plugins: Vec<String>,
+    #[serde(default = "HashSet::new")]
+    pub enabled_plugins: HashSet<String>,
     #[serde(default = "def_true")]
     pub auto_resize: bool,
 }
