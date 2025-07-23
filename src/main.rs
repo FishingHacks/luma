@@ -155,10 +155,23 @@ pub struct PluginContext<'cfg> {
     config: Option<&'cfg PluginSettingsRoot>,
 }
 
+macro_rules! plugin_ctx_from_ctx {
+    ($ctx:expr, $plugin_id:expr) => {
+        PluginContext::from_context(
+            &$ctx,
+            $ctx.config.plugin_settings.as_ref().get_root($plugin_id),
+        )
+    };
+}
+
 impl<'cfg> PluginContext<'cfg> {
-    pub fn from_context(context: &'cfg Context, plugin: &str) -> Self {
+    #[must_use]
+    pub fn from_context(
+        context: &'cfg Context,
+        plugin_config: Option<&'cfg PluginSettingsRoot>,
+    ) -> Self {
         Self {
-            config: context.config.plugin_settings.get(plugin),
+            config: plugin_config,
             http_cache: context.http_cache.clone(),
             file_index: context.file_index.clone(),
             sqlite: context.sqlite.clone(),
@@ -167,6 +180,7 @@ impl<'cfg> PluginContext<'cfg> {
         }
     }
 
+    #[must_use]
     pub fn to_context(self) -> Context {
         Context {
             http_cache: self.http_cache,
@@ -584,6 +598,7 @@ impl State {
             controller.start(
                 self.plugins.as_slice().into(),
                 self.search_query.trim().to_lowercase(),
+                self.context.clone(),
             );
         } else {
             log::error!("Failed to query: no collector controller present");
@@ -608,7 +623,7 @@ impl State {
                 plugin.any_handle_pre(
                     entry.data.clone(),
                     &action.id,
-                    PluginContext::from_context(&self.context, plugin.any_prefix()),
+                    plugin_ctx_from_ctx!(self.context, plugin.any_prefix()),
                 ),
                 Task::done(Message::HideMainWindow),
                 Task::done(Message::HandleAction {
@@ -622,12 +637,12 @@ impl State {
                 plugin.any_handle_pre(
                     entry.data.clone(),
                     &action.id,
-                    PluginContext::from_context(&self.context, plugin.any_prefix()),
+                    plugin_ctx_from_ctx!(self.context, plugin.any_prefix()),
                 ),
                 plugin.any_handle_post(
                     entry.data.clone(),
                     &action.id,
-                    PluginContext::from_context(&self.context, plugin.any_prefix()),
+                    plugin_ctx_from_ctx!(self.context, plugin.any_prefix()),
                 ),
             ])
         }
@@ -831,9 +846,21 @@ impl State {
             .map(|v| &**v)
     }
 
-    pub fn add_plugin_instance<T: InstancePlugin>(&mut self, value: T, id: impl Into<StringLike>) {
+    pub fn add_plugin_instance<T: InstancePlugin>(
+        &mut self,
+        mut value: T,
+        id: impl Into<StringLike>,
+    ) {
         let s = id.into();
         if let Some(config) = value.config() {
+            if self
+                .context
+                .config
+                .plugin_settings
+                .apply_defaults(&s, &config)
+            {
+                log::error!("Config for plugin `{s}` is incorrect!");
+            }
             self.plugin_configs.insert(s.clone(), config);
         }
         self.plugin_builder
@@ -843,6 +870,14 @@ impl State {
         self.plugin_builder
             .push((T::prefix().into(), Box::new(|| Box::new(T::default()))));
         if let Some(config) = T::config() {
+            if self
+                .context
+                .config
+                .plugin_settings
+                .apply_defaults(T::prefix(), &config)
+            {
+                log::error!("Config for plugin `{}` is incorrect!", T::prefix());
+            }
             self.plugin_configs.insert(T::prefix().into(), config);
         }
     }
@@ -896,7 +931,15 @@ impl State {
             self.initializing_plugins.push(
                 tokio::spawn(async move {
                     plugin
-                        .any_init(PluginContext::from_context(&context, plugin.any_prefix()))
+                        .any_init(PluginContext::from_context(
+                            &context,
+                            context
+                                .config
+                                .plugin_settings
+                                .as_ref_async()
+                                .await
+                                .get_root(plugin.any_prefix()),
+                        ))
                         .await;
                     sender
                         .send(Message::AddPlugin(SharedAnyPlugin(plugin.into())))
@@ -1018,7 +1061,7 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             plugin.any_handle_post(
                 data,
                 &action,
-                PluginContext::from_context(&state.context, plugin.any_prefix()),
+                plugin_ctx_from_ctx!(state.context, plugin.any_prefix()),
             )
         }),
         Message::Exit => iced::exit(),
@@ -1051,9 +1094,17 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 );
                 return Task::none();
             };
+            for (plugin, scheme) in &state.plugin_configs {
+                if cfg.plugin_settings.apply_defaults(plugin.to_str(), scheme) {
+                    log::error!("config for plugin `{}` is incorrect", plugin.to_str());
+                }
+            }
             state.context.config = cfg;
             if save {
                 state.save_config();
+            }
+            if state.window.is_some() {
+                state.update_matches();
             }
             if let Some(sender) = state.index_sender.as_ref() {
                 // it is fine to ignore this result because if the file indexing stopped, some
@@ -1089,8 +1140,7 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             _ = sender.try_send(state.context.clone());
             Task::none()
         }
-        Message::CollectorMessage(CollectorMessage::Ready(mut controller)) => {
-            controller.init(state.context.clone());
+        Message::CollectorMessage(CollectorMessage::Ready(controller)) => {
             state.collector_controller = Some(controller);
             Task::none()
         }

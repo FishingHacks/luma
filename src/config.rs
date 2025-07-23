@@ -1,6 +1,6 @@
 use std::{
     borrow::Borrow,
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fmt::{Debug, Display, Write},
     ops::Deref,
     path::{Path, PathBuf},
@@ -204,9 +204,9 @@ pub struct Config {
     #[serde(default = "def_true")]
     pub auto_resize: bool,
     #[serde(default = "Default::default", rename = "plugin")]
-    pub plugin_settings: HashMap<String, PluginSettingsRoot>,
+    pub plugin_settings: PluginSettingsHolder,
 }
 
-use crate::plugin_settings::PluginSettingsRoot;
+use crate::plugin_settings::PluginSettingsHolder;
 #[allow(unused_imports)]
 pub use crate::plugin_settings::{PluginSettings, PluginSettingsValue};

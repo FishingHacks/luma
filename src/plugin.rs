@@ -336,7 +336,8 @@ impl Entry {
 }
 
 pub trait InstancePlugin: Plugin + Clone + 'static {
-    fn config(&self) -> Option<PluginSettings>;
+    /// This function will only ever be called once.
+    fn config(&mut self) -> Option<PluginSettings>;
 }
 impl<T: StructPlugin> Plugin for T {
     fn prefix(&self) -> &str {

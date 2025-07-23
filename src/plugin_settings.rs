@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
-use std::ops::{Deref, Index};
-use std::sync::OnceLock;
+use std::ops::{BitOr, BitOrAssign, Deref, Index};
+use std::sync::{Arc, OnceLock};
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 use mlua::IntoLua;
 use serde::{Deserialize, Serialize, de::Visitor};
@@ -102,7 +103,7 @@ impl<'de> Deserialize<'de> for PluginSettingsValue {
                 while let Some((k, v)) = map.next_entry()? {
                     btree.insert(k, v);
                 }
-                Ok(PSV::Object(btree))
+                Ok(PSV::Map(btree))
             }
         }
         deserializer.deserialize_any(PSVVisitor)
@@ -121,7 +122,7 @@ impl Serialize for PluginSettingsValue {
             PSV::Int(i) => serializer.serialize_i64(*i),
             PSV::Boolean(b) => serializer.serialize_bool(*b),
             PSV::List(list) => serializer.collect_seq(list.iter()),
-            PSV::Object(map) => serializer.collect_map(map.iter()),
+            PSV::Map(map) => serializer.collect_map(map.iter()),
             PSV::Null => serializer.serialize_none(),
         }
     }
@@ -135,7 +136,7 @@ impl Debug for PluginSettingsValue {
             PluginSettingsValue::Int(v) => Debug::fmt(v, f),
             PluginSettingsValue::Boolean(v) => Debug::fmt(v, f),
             PluginSettingsValue::List(v) => Debug::fmt(v, f),
-            PluginSettingsValue::Object(map) => f.debug_map().entries(map.iter()).finish(),
+            PluginSettingsValue::Map(map) => f.debug_map().entries(map.iter()).finish(),
             PluginSettingsValue::Null => Ok(()),
         }
     }
@@ -175,9 +176,9 @@ impl PluginSettingsValue {
             _ => &[],
         }
     }
-    pub fn as_map(&self) -> Option<&BTreeMap<String, Self>> {
+    pub fn as_map(&self) -> Option<&BTreeMap<Box<str>, Self>> {
         match self {
-            Self::Object(map) => Some(map),
+            Self::Map(map) => Some(map),
             _ => None,
         }
     }
@@ -198,10 +199,10 @@ impl IntoLua for &PluginSettingsValue {
                 }
                 mlua::Value::Table(table)
             }
-            PSV::Object(map) => {
+            PSV::Map(map) => {
                 let table = lua.create_table()?;
                 for (k, v) in map {
-                    table.set(k.as_str(), v)?;
+                    table.set(&**k, v)?;
                 }
                 mlua::Value::Table(table)
             }
@@ -291,69 +292,341 @@ pub enum PluginSettingsValue {
     Int(i64),
     Boolean(bool),
     List(Vec<PluginSettingsValue>),
-    Object(BTreeMap<String, PluginSettingsValue>),
+    Map(BTreeMap<Box<str>, PluginSettingsValue>),
     Null,
 }
 
 #[derive(Debug)]
 pub enum PluginSettings {
     Object {
-        values: HashMap<String, PluginSettings>,
-        label: Option<String>,
+        values: HashMap<Box<str>, PluginSettings>,
+        label: Option<Box<str>>,
     },
     List {
         value_type: Box<PluginSettings>,
         max_entries: Option<usize>,
-        label: Option<String>,
+        label: Option<Box<str>>,
     },
     ParagraphInput {
         min: usize,
         max: Option<usize>,
-        label: Option<String>,
+        label: Option<Box<str>>,
+        default: Box<str>,
     },
     StringInput {
         min: usize,
         max: Option<usize>,
-        label: Option<String>,
+        label: Option<Box<str>>,
+        default: Box<str>,
     },
     Checkbox {
-        label: Option<String>,
+        label: Option<Box<str>>,
+        default: bool,
     },
     Toggle {
-        label: Option<String>,
+        label: Option<Box<str>>,
+        default: bool,
     },
     // PickList [[why are iced names this cursed lmao]]
     Dropdown {
-        values: Vec<String>,
-        label: Option<String>,
+        values: Vec<Box<str>>,
+        label: Option<Box<str>>,
+        default: usize,
     },
     // PickList [[why are iced names this cursed lmao]]
     SearchableDropdown {
-        values: Vec<String>,
-        label: Option<String>,
+        values: Vec<Box<str>>,
+        label: Option<Box<str>>,
+        default: usize,
     },
     IntSlider {
         min: i64,
         max: i64,
         step: i64,
-        label: Option<String>,
+        default: i64,
+        label: Option<Box<str>>,
     },
     IntInput {
         min: Option<i64>,
         max: Option<i64>,
         step: i64,
-        label: Option<String>,
+        default: i64,
+        label: Option<Box<str>>,
     },
     Slider {
         min: f64,
         max: f64,
         step: Option<f64>,
-        label: Option<String>,
+        default: f64,
+        label: Option<Box<str>>,
     },
     NumInput {
         min: Option<f64>,
         max: Option<f64>,
         step: Option<f64>,
-        label: Option<String>,
+        default: f64,
+        label: Option<Box<str>>,
     },
+}
+
+impl<'de> Deserialize<'de> for PluginSettingsHolder {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let map = Deserialize::deserialize(deserializer)?;
+        Ok(Self {
+            settings: Arc::new(RwLock::new(map)),
+        })
+    }
+}
+
+impl Serialize for PluginSettingsHolder {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.settings.blocking_read().serialize(serializer)
+    }
+}
+
+pub struct PluginSettingsHolderRef<'a> {
+    settings: RwLockReadGuard<'a, HashMap<Box<str>, PluginSettingsRoot>>,
+}
+
+impl PluginSettingsHolderRef<'_> {
+    pub fn get_lua(&self, id: &str, lua: &mlua::Lua) -> Option<mlua::Value> {
+        Some(self.settings.get(id)?.get_lua(lua).clone())
+    }
+    pub fn get_root(&self, id: &str) -> Option<&PluginSettingsRoot> {
+        self.settings.get(id)
+    }
+}
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Default)]
+pub struct PluginSettingsHolder {
+    settings: Arc<RwLock<HashMap<Box<str>, PluginSettingsRoot>>>,
+}
+
+impl PluginSettingsHolder {
+    pub async fn as_ref_async(&self) -> PluginSettingsHolderRef<'_> {
+        PluginSettingsHolderRef {
+            settings: self.settings.read().await,
+        }
+    }
+    pub fn as_ref(&self) -> PluginSettingsHolderRef<'_> {
+        PluginSettingsHolderRef {
+            settings: self.settings.blocking_read(),
+        }
+    }
+    pub fn set(&self, plugin: &str, value: PluginSettingsValue) {
+        if let Some(plugin) = self.settings.blocking_write().get_mut(plugin) {
+            plugin.value = value;
+            plugin.lua = OnceLock::new();
+        }
+    }
+    /// applys default, returning if the config is malformed.
+    pub fn apply_defaults(&self, plugin: &str, scheme: &PluginSettings) -> bool {
+        let mut reader = self.settings.blocking_write();
+        let value = reader.get_mut(plugin);
+        match value {
+            None => {
+                reader.insert(
+                    plugin.into(),
+                    PluginSettingsRoot {
+                        value: Self::default(scheme),
+                        lua: OnceLock::new(),
+                    },
+                );
+                false
+            }
+            Some(value) => match Self::apply_default(scheme, &mut value.value) {
+                DefaultApplyResult::NoChanges => false,
+                DefaultApplyResult::Changes => {
+                    value.lua = OnceLock::new();
+                    false
+                }
+                DefaultApplyResult::Error => true,
+            },
+        }
+    }
+
+    fn apply_default(
+        scheme: &PluginSettings,
+        value: &mut PluginSettingsValue,
+    ) -> DefaultApplyResult {
+        use PluginSettings as PS;
+        use PluginSettingsValue as PSV;
+
+        let mut result = DefaultApplyResult::NoChanges;
+        match (scheme, value) {
+            (PS::Object { values, .. }, PSV::Map(map)) => {
+                for (k, scheme) in values {
+                    let value = map.get_mut(k);
+                    if let Some(v) = value {
+                        result |= Self::apply_default(scheme, v);
+                    } else {
+                        result |= DefaultApplyResult::Changes;
+                        map.insert(k.clone(), Self::default(scheme));
+                    }
+                }
+            }
+            (
+                PS::List {
+                    value_type,
+                    max_entries,
+                    ..
+                },
+                PSV::List(list),
+            ) => {
+                list.iter_mut()
+                    .for_each(|v| result |= Self::apply_default(value_type, v));
+                if let Some(len) = max_entries
+                    && list.len() > *len
+                {
+                    return DefaultApplyResult::Error;
+                }
+            }
+            (PS::ParagraphInput { min, max, .. }, PSV::String(s)) => {
+                if s.len() < *min {
+                    return DefaultApplyResult::Error;
+                }
+                if let Some(max) = max
+                    && s.len() > *max
+                {
+                    return DefaultApplyResult::Error;
+                }
+            }
+            (PS::StringInput { min, max, .. }, PSV::String(s)) => {
+                if s.len() < *min {
+                    return DefaultApplyResult::Error;
+                }
+                if let Some(max) = max
+                    && s.len() > *max
+                {
+                    return DefaultApplyResult::Error;
+                }
+                if s.contains('\n') {
+                    return DefaultApplyResult::Error;
+                }
+            }
+            (PS::Checkbox { .. } | PS::Toggle { .. }, PSV::Boolean(_)) => (),
+            (
+                PS::Dropdown { values, .. } | PS::SearchableDropdown { values, .. },
+                PSV::String(s),
+            ) if !values.iter().any(|v| **v == *s) => return DefaultApplyResult::Error,
+            (PS::IntSlider { min, max, step, .. }, PSV::Int(i)) => {
+                if *i < *min {
+                    return DefaultApplyResult::Error;
+                }
+                if *i > *max {
+                    return DefaultApplyResult::Error;
+                }
+                if *i % *step != 0 {
+                    return DefaultApplyResult::Error;
+                }
+            }
+            (PS::IntInput { min, max, step, .. }, PSV::Int(i)) => {
+                if let Some(min) = min
+                    && *i < *min
+                {
+                    return DefaultApplyResult::Error;
+                }
+                if let Some(max) = max
+                    && *i > *max
+                {
+                    return DefaultApplyResult::Error;
+                }
+                if *i % *step != 0 {
+                    return DefaultApplyResult::Error;
+                }
+            }
+            (PS::Slider { min, max, step, .. }, PSV::Number(n)) => {
+                if *n < *min {
+                    return DefaultApplyResult::Error;
+                }
+                if *n > *max {
+                    return DefaultApplyResult::Error;
+                }
+                if let Some(step) = step
+                    && *n % *step != 0.0
+                {
+                    return DefaultApplyResult::Error;
+                }
+            }
+            (PS::NumInput { min, max, step, .. }, PSV::Number(n)) => {
+                if let Some(min) = min
+                    && *n < *min
+                {
+                    return DefaultApplyResult::Error;
+                }
+                if let Some(max) = max
+                    && *n > *max
+                {
+                    return DefaultApplyResult::Error;
+                }
+                if let Some(step) = step
+                    && *n % *step != 0.0
+                {
+                    return DefaultApplyResult::Error;
+                }
+            }
+            _ => return DefaultApplyResult::Error,
+        }
+        result
+    }
+
+    fn default(scheme: &PluginSettings) -> PluginSettingsValue {
+        use PluginSettings as E;
+        match scheme {
+            E::Object { values, .. } => {
+                let mut map = BTreeMap::new();
+                for (k, v) in values {
+                    map.insert(k.clone(), Self::default(v));
+                }
+                PluginSettingsValue::Map(map)
+            }
+            E::List { .. } => PluginSettingsValue::List(Vec::new()),
+            E::ParagraphInput { default, .. } | E::StringInput { default, .. } => {
+                PluginSettingsValue::String(default.to_string())
+            }
+            E::Checkbox { default, .. } | E::Toggle { default, .. } => {
+                PluginSettingsValue::Boolean(*default)
+            }
+            E::Dropdown {
+                values, default, ..
+            }
+            | E::SearchableDropdown {
+                values, default, ..
+            } => PluginSettingsValue::String(values[*default].to_string()),
+            E::IntSlider { default, .. } | E::IntInput { default, .. } => {
+                PluginSettingsValue::Int(*default)
+            }
+            E::Slider { default, .. } | E::NumInput { default, .. } => {
+                PluginSettingsValue::Number(*default)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DefaultApplyResult {
+    NoChanges = 0,
+    Changes = 1,
+    Error = 2,
+}
+
+impl BitOr for DefaultApplyResult {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        if self as u8 > rhs as u8 { self } else { rhs }
+    }
+}
+
+impl BitOrAssign for DefaultApplyResult {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = *self | rhs;
+    }
 }

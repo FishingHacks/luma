@@ -1,6 +1,7 @@
 use iced::{
     Element, Length, Task,
-    widget::{button, checkbox, column, row, text, vertical_space},
+    alignment::Vertical,
+    widget::{button, checkbox, column, horizontal_space, row, text, vertical_space},
     window,
 };
 
@@ -27,6 +28,7 @@ pub enum SettingsMessage {
     SetForceFocus(bool),
     SetPluginEnabled(StringLike, bool),
     Save,
+    Discard,
 }
 
 impl SettingsState {
@@ -70,13 +72,19 @@ impl SettingsState {
                 }),
             ];
             if state.plugin_configs.contains_key(plugin) {
-                row = row.push(button("Edit Plugin Config"));
+                row = row
+                    .push(horizontal_space().width(Length::Fixed(20.0)))
+                    .push(button("Edit Plugin Config"))
+                    .align_y(Vertical::Center);
             }
             col = col.push(row);
         }
         col = col
             .push(vertical_space().width(Length::Fill).height(Length::Fill))
-            .push(button("Save").on_press((SettingsMessage::Save, id).into()));
+            .push(row![
+                button("Save").on_press((SettingsMessage::Save, id).into()),
+                button("Discard").on_press((SettingsMessage::Discard, id).into())
+            ]);
         col.into()
     }
 
@@ -87,6 +95,7 @@ impl SettingsState {
         message: SettingsMessage,
     ) -> Task<Message> {
         match message {
+            SettingsMessage::Discard => return window::close(id),
             SettingsMessage::Save => {
                 return Task::batch([
                     window::close(id),

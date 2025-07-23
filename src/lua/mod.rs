@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, LazyLock},
 };
@@ -38,16 +39,32 @@ impl FromLua for LuaEntry {
     }
 }
 
-#[derive(Clone)]
 pub struct LuaPlugin {
     actions: Arc<[Action]>,
+    config: Option<PluginSettings>,
     prefix: Arc<str>,
     get_for_values: Function,
     init: Option<Function>,
     handle_pre: Option<Function>,
     handle_post: Option<Function>,
-    me: Table,
+    table: Table,
     lua: Lua,
+}
+
+impl Clone for LuaPlugin {
+    fn clone(&self) -> Self {
+        Self {
+            actions: self.actions.clone(),
+            config: None,
+            prefix: self.prefix.clone(),
+            get_for_values: self.get_for_values.clone(),
+            init: self.init.clone(),
+            handle_pre: self.handle_pre.clone(),
+            handle_post: self.handle_post.clone(),
+            table: self.table.clone(),
+            lua: self.lua.clone(),
+        }
+    }
 }
 
 impl LuaPlugin {
@@ -58,14 +75,29 @@ impl LuaPlugin {
         for action in actions_data {
             actions.push(action.take()?);
         }
+        let prefix = prefix.into();
+        let config = table.get::<Option<Table>>("config")?.map(|table| {
+            let mut values = HashMap::new();
+            for (k, v) in table
+                .pairs::<Box<str>, PluginSettings>()
+                .filter_map(Result::ok)
+            {
+                values.insert(k, v);
+            }
+            PluginSettings::Object {
+                values,
+                label: Some((&*prefix).into()),
+            }
+        });
         Ok(Self {
-            actions: actions.into(),
-            prefix: prefix.into(),
             get_for_values: table.get("get_for_values")?,
             init: table.get("init")?,
             handle_pre: table.get("handle_pre")?,
             handle_post: table.get("handle_post")?,
-            me: table,
+            config,
+            actions: actions.into(),
+            prefix,
+            table,
             lua: lua.clone(),
         })
     }
@@ -79,7 +111,7 @@ impl LuaPlugin {
             .lua
             .create_thread(self.get_for_values.clone())?
             .into_async::<Option<LuaEntry>>((
-                &self.me,
+                &self.table,
                 MatcherInputUserData(input),
                 ContextUserData::new(context, &self.lua),
             ));
@@ -108,8 +140,8 @@ impl LuaPlugin {
 }
 
 impl InstancePlugin for LuaPlugin {
-    fn config(&self) -> Option<PluginSettings> {
-        None
+    fn config(&mut self) -> Option<PluginSettings> {
+        self.config.take()
     }
 }
 
@@ -144,7 +176,7 @@ impl Plugin for LuaPlugin {
     async fn init(&mut self, context: PluginContext<'_>) {
         if let Some(ref f) = self.init
             && let Err(e) = f
-                .call_async::<Value>((&self.me, ContextUserData::new(context, &self.lua)))
+                .call_async::<Value>((&self.table, ContextUserData::new(context, &self.lua)))
                 .await
         {
             log::error!("In {}.lua: {e}", self.prefix);
@@ -160,7 +192,7 @@ impl Plugin for LuaPlugin {
         let thing = thing.into::<Value>();
         if let Some(ref f) = self.handle_pre {
             match f.call::<TaskWrapper>((
-                &self.me,
+                &self.table,
                 thing,
                 action,
                 ContextUserData::new(context, &self.lua),
@@ -180,7 +212,7 @@ impl Plugin for LuaPlugin {
         let thing = thing.into::<Value>();
         if let Some(ref f) = self.handle_post {
             match f.call::<TaskWrapper>((
-                &self.me,
+                &self.table,
                 thing,
                 action,
                 ContextUserData::new(context, &self.lua),
@@ -445,3 +477,119 @@ pub fn load_lua_plugin<'a>(
 
 pub static LUA_PLUGIN_DIR: LazyLock<PathBuf> =
     LazyLock::new(|| std::env::current_dir().unwrap().join("lua_plugins"));
+
+impl FromLua for PluginSettings {
+    fn from_lua(value: Value, lua: &Lua) -> mlua::Result<Self> {
+        let t = Table::from_lua(value, lua)?;
+        let label: Option<Box<str>> = t.get("label")?;
+        let typ: Box<str> = t.get("type")?;
+        Ok(match &*typ {
+            "section" => {
+                let mut values = HashMap::new();
+                for (k, v) in t
+                    .pairs::<Box<str>, Value>()
+                    .filter_map(Result::ok)
+                    .filter(|(k, _)| **k != *"type" && **k != *"label")
+                {
+                    let v = PluginSettings::from_lua(v, lua)?;
+                    values.insert(k, v);
+                }
+                Self::Object { values, label }
+            }
+            "list" => Self::List {
+                max_entries: t.get("max_entries")?,
+                value_type: Box::new(t.get("value_type")?),
+                label,
+            },
+            "paragraph" | "paragraph_input" => Self::ParagraphInput {
+                min: t.get::<Option<_>>("min")?.unwrap_or(0),
+                max: t.get("max")?,
+                label,
+                default: t.get::<Option<_>>("default")?.unwrap_or_default(),
+            },
+            "string" | "input" | "string_input" => Self::StringInput {
+                min: t.get::<Option<_>>("min")?.unwrap_or(0),
+                max: t.get("max")?,
+                label,
+                default: t.get::<Option<_>>("default")?.unwrap_or_default(),
+            },
+            "checkbox" | "checkmark" => Self::Checkbox {
+                label,
+                default: t.get::<Option<_>>("default")?.unwrap_or(false),
+            },
+            "toggle" | "switch" => Self::Toggle {
+                label,
+                default: t.get::<Option<_>>("default")?.unwrap_or(false),
+            },
+            "dropdown" => {
+                let values: Vec<Box<str>> = t.get("values")?;
+                Self::Dropdown {
+                    default: t
+                        .get::<Option<Box<str>>>("default")?
+                        .and_then(|v| values.iter().position(|el| *el == v))
+                        .unwrap_or(0),
+                    values,
+                    label,
+                }
+            }
+            "searchable_dropdown" => {
+                let values: Vec<Box<str>> = t.get("values")?;
+                Self::SearchableDropdown {
+                    default: t
+                        .get::<Option<Box<str>>>("default")?
+                        .and_then(|v| values.iter().position(|el| *el == v))
+                        .unwrap_or(0),
+                    values,
+                    label,
+                }
+            }
+            "intslider" | "int_slider" => {
+                let min = t.get("min")?;
+                Self::IntSlider {
+                    min,
+                    max: t.get("max")?,
+                    step: t.get::<Option<_>>("step")?.unwrap_or(1),
+                    default: t.get::<Option<_>>("default")?.unwrap_or(min),
+                    label,
+                }
+            }
+            "intinput" | "int_input" => {
+                let min = t.get("min")?;
+                Self::IntInput {
+                    min,
+                    max: t.get("max")?,
+                    step: t.get::<Option<_>>("step")?.unwrap_or(1),
+                    default: t.get::<Option<i64>>("default")?.and(min).unwrap_or(0),
+                    label,
+                }
+            }
+            "slider" => {
+                let min = t.get("min")?;
+                Self::Slider {
+                    min,
+                    max: t.get("max")?,
+                    step: t.get("step")?,
+                    default: t.get::<Option<_>>("default")?.unwrap_or(min),
+                    label,
+                }
+            }
+            "numinput" | "num_input" => {
+                let min = t.get("min")?;
+                Self::NumInput {
+                    min,
+                    max: t.get("max")?,
+                    step: t.get("step")?,
+                    default: t.get::<Option<f64>>("default")?.and(min).unwrap_or(0.0),
+                    label,
+                }
+            }
+            _ => {
+                return Err(mlua::Error::FromLuaConversionError {
+                    from: "table",
+                    to: "plugin settings".to_string(),
+                    message: Some(format!("No widget type {typ:?}")),
+                });
+            }
+        })
+    }
+}
