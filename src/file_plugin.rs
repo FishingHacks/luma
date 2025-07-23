@@ -8,8 +8,8 @@ use iced::{
 };
 
 use crate::{
-    Action, Context, CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput,
-    plugin::StringLike, utils,
+    Action, CustomData, Entry, Message, PluginContext, ResultBuilderRef, StructPlugin,
+    matcher::MatcherInput, plugin::StringLike, utils,
 };
 
 #[derive(Default)]
@@ -41,8 +41,8 @@ fn iter<'a>(
         })
 }
 
-impl Plugin for FilePlugin {
-    fn prefix(&self) -> &'static str {
+impl StructPlugin for FilePlugin {
+    fn prefix() -> &'static str {
         "file"
     }
 
@@ -50,7 +50,7 @@ impl Plugin for FilePlugin {
         &self,
         input: &MatcherInput,
         builder: ResultBuilderRef<'_>,
-        context: Context,
+        context: PluginContext<'_>,
     ) {
         let reader = context.file_index.read().await;
         let iter = iter(
@@ -64,9 +64,9 @@ impl Plugin for FilePlugin {
         builder.commit(iter).await;
     }
 
-    async fn init(&mut self, _: Context) {}
+    async fn init(&mut self, _: PluginContext<'_>) {}
 
-    fn handle_pre(&self, thing: CustomData, action: &str, _: Context) -> Task<Message> {
+    fn handle_pre(&self, thing: CustomData, action: &str, _: PluginContext<'_>) -> Task<Message> {
         let path = thing.into::<Arc<Path>>();
         if action == "open" {
             utils::open_file(path);

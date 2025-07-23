@@ -4,12 +4,17 @@
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::unreadable_literal)]
 use std::{
-    borrow::Cow, collections::BTreeMap, ffi::OsStr, fmt::Debug, hash::Hash, sync::Arc,
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
+    ffi::OsStr,
+    fmt::Debug,
+    hash::Hash,
+    sync::Arc,
     time::Duration,
 };
 
 use cache::HTTPCache;
-use config::{BlurAction, Config};
+use config::{BlurAction, Config, PluginSettings};
 use control_plugin::ControlPlugin;
 use dice_plugin::DicePlugin;
 use fend_plugin::FendPlugin;
@@ -34,6 +39,7 @@ use iced::{
 };
 use mlua::Lua;
 use notify::{EventKind, RecursiveMode, Watcher};
+use plugin_settings::PluginSettingsRoot;
 use run_plugin::RunPlugin;
 use search_input::SearchInput;
 use special_windows::{SpecialWindowMessage, SpecialWindowState};
@@ -53,6 +59,7 @@ mod logging;
 mod lua;
 mod matcher;
 mod plugin;
+mod plugin_settings;
 mod run_plugin;
 mod search_input;
 mod special_windows;
@@ -60,7 +67,7 @@ mod sqlite;
 mod theme_plugin;
 mod utils;
 pub use filter_service::ResultBuilder;
-use plugin::{AnyPlugin, GenericEntry, StringLike};
+use plugin::{AnyPlugin, GenericEntry, InstancePlugin, StringLike, StructPlugin};
 pub use plugin::{CustomData, Entry, Plugin};
 use tokio::{
     sync::{
@@ -139,6 +146,39 @@ impl Default for MessageSender {
 }
 
 #[derive(Clone)]
+pub struct PluginContext<'cfg> {
+    http_cache: Arc<RwLock<HTTPCache>>,
+    file_index: Arc<RwLock<FileIndex>>,
+    sqlite: SqliteContext,
+    message_sender: MessageSender,
+    global_config: Arc<Config>,
+    config: Option<&'cfg PluginSettingsRoot>,
+}
+
+impl<'cfg> PluginContext<'cfg> {
+    pub fn from_context(context: &'cfg Context, plugin: &str) -> Self {
+        Self {
+            config: context.config.plugin_settings.get(plugin),
+            http_cache: context.http_cache.clone(),
+            file_index: context.file_index.clone(),
+            sqlite: context.sqlite.clone(),
+            message_sender: context.message_sender.clone(),
+            global_config: context.config.clone(),
+        }
+    }
+
+    pub fn to_context(self) -> Context {
+        Context {
+            http_cache: self.http_cache,
+            file_index: self.file_index,
+            sqlite: self.sqlite,
+            message_sender: self.message_sender,
+            config: self.global_config,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Context {
     http_cache: Arc<RwLock<HTTPCache>>,
     file_index: Arc<RwLock<FileIndex>>,
@@ -207,6 +247,7 @@ pub struct State {
     plugins: Vec<Arc<dyn AnyPlugin>>,
     initializing_plugins: Vec<AbortHandle>,
     plugin_builder: Vec<(StringLike, PluginBuilder)>,
+    plugin_configs: HashMap<StringLike, PluginSettings>,
     theme: Theme,
     index_sender: Option<UnboundedSender<FileIndexMessage>>,
     collector_controller: Option<CollectorController>,
@@ -564,7 +605,11 @@ impl State {
         if action.closes {
             let entry = self.results.remove(index);
             Task::batch([
-                plugin.any_handle_pre(entry.data.clone(), &action.id, self.context.clone()),
+                plugin.any_handle_pre(
+                    entry.data.clone(),
+                    &action.id,
+                    PluginContext::from_context(&self.context, plugin.any_prefix()),
+                ),
                 Task::done(Message::HideMainWindow),
                 Task::done(Message::HandleAction {
                     plugin: entry.plugin,
@@ -574,8 +619,16 @@ impl State {
             ])
         } else {
             Task::batch([
-                plugin.any_handle_pre(entry.data.clone(), &action.id, self.context.clone()),
-                plugin.any_handle_post(entry.data.clone(), &action.id, self.context.clone()),
+                plugin.any_handle_pre(
+                    entry.data.clone(),
+                    &action.id,
+                    PluginContext::from_context(&self.context, plugin.any_prefix()),
+                ),
+                plugin.any_handle_post(
+                    entry.data.clone(),
+                    &action.id,
+                    PluginContext::from_context(&self.context, plugin.any_prefix()),
+                ),
             ])
         }
     }
@@ -778,17 +831,20 @@ impl State {
             .map(|v| &**v)
     }
 
-    pub fn add_plugin_instance<T: Plugin + Clone + 'static>(
-        &mut self,
-        value: T,
-        id: impl Into<StringLike>,
-    ) {
+    pub fn add_plugin_instance<T: InstancePlugin>(&mut self, value: T, id: impl Into<StringLike>) {
+        let s = id.into();
+        if let Some(config) = value.config() {
+            self.plugin_configs.insert(s.clone(), config);
+        }
         self.plugin_builder
-            .push((id.into(), Box::new(move || Box::new(value.clone()))));
+            .push((s, Box::new(move || Box::new(value.clone()))));
     }
-    pub fn add_plugin<T: Plugin + Default + 'static>(&mut self, id: impl Into<StringLike>) {
+    pub fn add_plugin<T: StructPlugin>(&mut self) {
         self.plugin_builder
-            .push((id.into(), Box::new(|| Box::new(T::default()))));
+            .push((T::prefix().into(), Box::new(|| Box::new(T::default()))));
+        if let Some(config) = T::config() {
+            self.plugin_configs.insert(T::prefix().into(), config);
+        }
     }
     pub fn add_lua_plugins(&mut self) {
         log::debug!("Loading lua plugins...");
@@ -839,7 +895,9 @@ impl State {
             let sender = context.message_sender.clone();
             self.initializing_plugins.push(
                 tokio::spawn(async move {
-                    plugin.any_init(context).await;
+                    plugin
+                        .any_init(PluginContext::from_context(&context, plugin.any_prefix()))
+                        .await;
                     sender
                         .send(Message::AddPlugin(SharedAnyPlugin(plugin.into())))
                         .await;
@@ -957,7 +1015,11 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             data,
             action,
         } => state.plugins.get(plugin).map_or_else(Task::none, |plugin| {
-            plugin.any_handle_post(data, &action, state.context.clone())
+            plugin.any_handle_post(
+                data,
+                &action,
+                PluginContext::from_context(&state.context, plugin.any_prefix()),
+            )
         }),
         Message::Exit => iced::exit(),
         Message::None => Task::none(),
@@ -1146,14 +1208,15 @@ fn main() -> iced::Result {
                 hotkey,
                 manager: manager.clone(),
                 initializing_plugins: Vec::new(),
+                plugin_configs: HashMap::new(),
             };
-            state.add_plugin::<ControlPlugin>(ControlPlugin.prefix());
-            state.add_plugin::<ThemePlugin>(ThemePlugin.prefix());
-            state.add_plugin::<DicePlugin>(DicePlugin.prefix());
-            state.add_plugin::<FendPlugin>(FendPlugin::PREFIX);
-            state.add_plugin::<RunPlugin>(RunPlugin::PREFIX);
+            state.add_plugin::<ControlPlugin>();
+            state.add_plugin::<ThemePlugin>();
+            state.add_plugin::<DicePlugin>();
+            state.add_plugin::<FendPlugin>();
+            state.add_plugin::<RunPlugin>();
             state.add_lua_plugins();
-            state.add_plugin::<FilePlugin>(FilePlugin.prefix());
+            state.add_plugin::<FilePlugin>();
             let focus_task = text_input::focus(text_input_id);
             let http_cache = state.context.http_cache.clone();
             let sqlite = sqlite.clone();

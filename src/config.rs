@@ -1,7 +1,7 @@
 use std::{
     borrow::Borrow,
-    collections::HashSet,
-    fmt::{Display, Write},
+    collections::{HashMap, HashSet},
+    fmt::{Debug, Display, Write},
     ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
@@ -187,7 +187,7 @@ pub enum BlurAction {
 
 impl Display for BlurAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(self, f)
+        Debug::fmt(self, f)
     }
 }
 
@@ -203,4 +203,10 @@ pub struct Config {
     pub enabled_plugins: HashSet<String>,
     #[serde(default = "def_true")]
     pub auto_resize: bool,
+    #[serde(default = "Default::default", rename = "plugin")]
+    pub plugin_settings: HashMap<String, PluginSettingsRoot>,
 }
+
+use crate::plugin_settings::PluginSettingsRoot;
+#[allow(unused_imports)]
+pub use crate::plugin_settings::{PluginSettings, PluginSettingsValue};

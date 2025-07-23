@@ -15,8 +15,8 @@ use mlua::{
 };
 
 use crate::{
-    Action, Context, CustomData, Entry, Message, Plugin, filter_service::ResultBuilderRef,
-    matcher::MatcherInput,
+    Action, CustomData, Entry, Message, Plugin, PluginContext, config::PluginSettings,
+    filter_service::ResultBuilderRef, matcher::MatcherInput, plugin::InstancePlugin,
 };
 
 pub struct LuaEntry {
@@ -69,14 +69,11 @@ impl LuaPlugin {
             lua: lua.clone(),
         })
     }
-}
-
-impl LuaPlugin {
     async fn get_for_values(
         &self,
         input: Arc<MatcherInput>,
         builder: ResultBuilderRef<'_>,
-        context: Context,
+        context: PluginContext<'_>,
     ) -> mlua::Result<()> {
         let thread = self
             .lua
@@ -84,10 +81,19 @@ impl LuaPlugin {
             .into_async::<Option<LuaEntry>>((
                 &self.me,
                 MatcherInputUserData(input),
-                ContextUserData(context),
+                ContextUserData::new(context, &self.lua),
             ));
         thread
-            .filter_map(async |v| v.ok().flatten())
+            .filter_map(async |v| match v {
+                Ok(v) => v,
+                Err(e) => {
+                    log::error!(
+                        "lua: failed to get values for plugin `{}`: {e}",
+                        self.prefix
+                    );
+                    None
+                }
+            })
             .for_each(|v| async move {
                 builder
                     .add(
@@ -98,6 +104,12 @@ impl LuaPlugin {
             })
             .await;
         Ok(())
+    }
+}
+
+impl InstancePlugin for LuaPlugin {
+    fn config(&self) -> Option<PluginSettings> {
+        None
     }
 }
 
@@ -114,40 +126,65 @@ impl Plugin for LuaPlugin {
         &self,
         input: Arc<MatcherInput>,
         builder: ResultBuilderRef<'_>,
-        context: Context,
+        context: PluginContext<'_>,
     ) {
         if let Err(e) = LuaPlugin::get_for_values(self, input, builder, context).await {
             log::error!("In {}.lua: {e}", self.prefix);
         }
     }
-    async fn get_for_values(&self, _: &MatcherInput, _: ResultBuilderRef<'_>, _: Context) {
+    async fn get_for_values(
+        &self,
+        _: &MatcherInput,
+        _: ResultBuilderRef<'_>,
+        _: PluginContext<'_>,
+    ) {
         unreachable!()
     }
 
-    async fn init(&mut self, context: Context) {
+    async fn init(&mut self, context: PluginContext<'_>) {
         if let Some(ref f) = self.init
             && let Err(e) = f
-                .call_async::<Value>((&self.me, ContextUserData(context)))
+                .call_async::<Value>((&self.me, ContextUserData::new(context, &self.lua)))
                 .await
         {
             log::error!("In {}.lua: {e}", self.prefix);
         }
     }
 
-    fn handle_pre(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {
+    fn handle_pre(
+        &self,
+        thing: CustomData,
+        action: &str,
+        context: PluginContext<'_>,
+    ) -> Task<Message> {
         let thing = thing.into::<Value>();
         if let Some(ref f) = self.handle_pre {
-            match f.call::<TaskWrapper>((&self.me, thing, action, ContextUserData(context))) {
+            match f.call::<TaskWrapper>((
+                &self.me,
+                thing,
+                action,
+                ContextUserData::new(context, &self.lua),
+            )) {
                 Err(e) => log::error!("In {}.lua: {e}", self.prefix),
                 Ok(v) => return v.0,
             }
         }
         Task::none()
     }
-    fn handle_post(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {
+    fn handle_post(
+        &self,
+        thing: CustomData,
+        action: &str,
+        context: PluginContext<'_>,
+    ) -> Task<Message> {
         let thing = thing.into::<Value>();
         if let Some(ref f) = self.handle_post {
-            match f.call::<TaskWrapper>((&self.me, thing, action, ContextUserData(context))) {
+            match f.call::<TaskWrapper>((
+                &self.me,
+                thing,
+                action,
+                ContextUserData::new(context, &self.lua),
+            )) {
                 Err(e) => log::error!("In {}.lua: {e}", self.prefix),
                 Ok(v) => return v.0,
             }
@@ -156,10 +193,26 @@ impl Plugin for LuaPlugin {
     }
 }
 
+// TODO: add context
 #[repr(transparent)]
-pub struct ContextUserData(Context);
+pub struct ContextUserData(mlua::Value);
+impl ContextUserData {
+    pub fn new(ctx: PluginContext, lua: &Lua) -> Self {
+        let value = ctx
+            .config
+            .map(|v| v.get_lua(lua).clone())
+            .unwrap_or_default();
+        // TODO: add context
+        drop(ctx);
+        Self(value)
+    }
+}
 
-impl UserData for ContextUserData {}
+impl UserData for ContextUserData {
+    fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("config", |_, me| Ok(me.0.clone()));
+    }
+}
 
 #[repr(transparent)]
 pub struct MatcherInputUserData(Arc<MatcherInput>);

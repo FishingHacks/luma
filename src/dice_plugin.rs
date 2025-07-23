@@ -3,14 +3,15 @@ use rand::Rng;
 use std::fmt::Write;
 
 use crate::{
-    Action, CustomData, Entry, Plugin, ResultBuilderRef, matcher::MatcherInput, plugin::StringLike,
+    Action, CustomData, Entry, ResultBuilderRef, StructPlugin, matcher::MatcherInput,
+    plugin::StringLike,
 };
 
 #[derive(Default)]
 pub struct DicePlugin;
 
-impl Plugin for DicePlugin {
-    fn prefix(&self) -> &'static str {
+impl StructPlugin for DicePlugin {
+    fn prefix() -> &'static str {
         "roll"
     }
 
@@ -18,7 +19,7 @@ impl Plugin for DicePlugin {
         &self,
         input: &MatcherInput,
         builder: ResultBuilderRef<'_>,
-        _: crate::Context,
+        _: crate::PluginContext<'_>,
     ) {
         let words = input.words();
         if words.is_empty() {
@@ -43,13 +44,13 @@ impl Plugin for DicePlugin {
         builder.commit(entries.into_iter()).await;
     }
 
-    async fn init(&mut self, _: crate::Context) {}
+    async fn init(&mut self, _: crate::PluginContext<'_>) {}
 
     fn handle_pre(
         &self,
         thing: crate::CustomData,
         _: &str,
-        _: crate::Context,
+        _: crate::PluginContext<'_>,
     ) -> iced::Task<crate::Message> {
         clipboard::write(format!("{}", thing.into::<usize>()))
     }

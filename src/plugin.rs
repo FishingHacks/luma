@@ -8,9 +8,10 @@ use iced::Task;
 use iced::futures::future::BoxFuture;
 use rusqlite::ToSql;
 
+use crate::config::PluginSettings;
 use crate::filter_service::ResultBuilderRef;
 use crate::matcher::MatcherInput;
-use crate::{Action, Context, Message, ResultBuilder};
+use crate::{Action, Message, PluginContext, ResultBuilder};
 
 #[derive(Clone, Debug, Eq)]
 pub enum StringLike {
@@ -272,7 +273,7 @@ pub trait Plugin: Send + Sync {
         &self,
         input: Arc<MatcherInput>,
         builder: ResultBuilderRef<'_>,
-        context: Context,
+        context: PluginContext,
     ) -> impl Future<Output = ()> + Send {
         async move { self.get_for_values(&input, builder, context).await }
     }
@@ -280,15 +281,20 @@ pub trait Plugin: Send + Sync {
         &self,
         input: &MatcherInput,
         builder: ResultBuilderRef<'_>,
-        context: Context,
+        context: PluginContext,
     ) -> impl Future<Output = ()> + Send;
-    fn init(&mut self, context: Context) -> impl Future<Output = ()> + Send;
+    fn init(&mut self, context: PluginContext) -> impl Future<Output = ()> + Send;
     #[allow(unused_variables)]
-    fn handle_pre(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {
+    fn handle_pre(&self, thing: CustomData, action: &str, context: PluginContext) -> Task<Message> {
         Task::none()
     }
     #[allow(unused_variables)]
-    fn handle_post(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {
+    fn handle_post(
+        &self,
+        thing: CustomData,
+        action: &str,
+        context: PluginContext,
+    ) -> Task<Message> {
         Task::none()
     }
 }
@@ -329,20 +335,116 @@ impl Entry {
     }
 }
 
+pub trait InstancePlugin: Plugin + Clone + 'static {
+    fn config(&self) -> Option<PluginSettings>;
+}
+impl<T: StructPlugin> Plugin for T {
+    fn prefix(&self) -> &str {
+        Self::prefix()
+    }
+
+    fn get_for_values(
+        &self,
+        input: &MatcherInput,
+        builder: ResultBuilderRef<'_>,
+        context: PluginContext,
+    ) -> impl Future<Output = ()> + Send {
+        StructPlugin::get_for_values(self, input, builder, context)
+    }
+
+    fn init(&mut self, context: PluginContext) -> impl Future<Output = ()> + Send {
+        StructPlugin::init(self, context)
+    }
+
+    fn actions(&self) -> &[Action] {
+        StructPlugin::actions(self)
+    }
+
+    fn get_for_values_arc(
+        &self,
+        input: Arc<MatcherInput>,
+        builder: ResultBuilderRef<'_>,
+        context: PluginContext,
+    ) -> impl Future<Output = ()> + Send {
+        StructPlugin::get_for_values_arc(self, input, builder, context)
+    }
+
+    fn handle_pre(&self, thing: CustomData, action: &str, context: PluginContext) -> Task<Message> {
+        StructPlugin::handle_pre(self, thing, action, context)
+    }
+
+    fn handle_post(
+        &self,
+        thing: CustomData,
+        action: &str,
+        context: PluginContext,
+    ) -> Task<Message> {
+        StructPlugin::handle_post(self, thing, action, context)
+    }
+}
+pub trait StructPlugin: Send + Sync + Default + 'static {
+    fn prefix() -> &'static str;
+    fn config() -> Option<PluginSettings> {
+        None
+    }
+
+    fn actions(&self) -> &[Action] {
+        const { &[Action::default("Default Action", "")] }
+    }
+    fn get_for_values_arc(
+        &self,
+        input: Arc<MatcherInput>,
+        builder: ResultBuilderRef<'_>,
+        context: PluginContext,
+    ) -> impl Future<Output = ()> + Send {
+        async move { self.get_for_values(&input, builder, context).await }
+    }
+    fn get_for_values(
+        &self,
+        input: &MatcherInput,
+        builder: ResultBuilderRef<'_>,
+        context: PluginContext,
+    ) -> impl Future<Output = ()> + Send;
+    fn init(&mut self, context: PluginContext) -> impl Future<Output = ()> + Send;
+    #[allow(unused_variables)]
+    fn handle_pre(&self, thing: CustomData, action: &str, context: PluginContext) -> Task<Message> {
+        Task::none()
+    }
+    #[allow(unused_variables)]
+    fn handle_post(
+        &self,
+        thing: CustomData,
+        action: &str,
+        context: PluginContext,
+    ) -> Task<Message> {
+        Task::none()
+    }
+}
+
 pub trait AnyPlugin: Send + Sync {
     fn as_any_ref(&self) -> &dyn std::any::Any;
     fn any_actions(&self) -> &[Action];
     fn any_prefix(&self) -> &str;
-    fn any_get_for_values<'future>(
-        &'future self,
+    fn any_get_for_values<'fut>(
+        &'fut self,
         input: Arc<MatcherInput>,
-        builder: &'future ResultBuilder,
+        builder: &'fut ResultBuilder,
         plugin_id: usize,
-        context: Context,
-    ) -> BoxFuture<'future, ()>;
-    fn any_init(&mut self, context: Context) -> BoxFuture<'_, ()>;
-    fn any_handle_pre(&self, thing: CustomData, action: &str, context: Context) -> Task<Message>;
-    fn any_handle_post(&self, thing: CustomData, action: &str, context: Context) -> Task<Message>;
+        context: PluginContext<'fut>,
+    ) -> BoxFuture<'fut, ()>;
+    fn any_init<'a>(&'a mut self, context: PluginContext<'a>) -> BoxFuture<'a, ()>;
+    fn any_handle_pre(
+        &self,
+        thing: CustomData,
+        action: &str,
+        context: PluginContext,
+    ) -> Task<Message>;
+    fn any_handle_post(
+        &self,
+        thing: CustomData,
+        action: &str,
+        context: PluginContext,
+    ) -> Task<Message>;
 }
 impl<T: Plugin + 'static> AnyPlugin for T {
     fn as_any_ref(&self) -> &dyn std::any::Any {
@@ -362,20 +464,30 @@ impl<T: Plugin + 'static> AnyPlugin for T {
         input: Arc<MatcherInput>,
         builder: &'fut ResultBuilder,
         plugin_id: usize,
-        context: Context,
+        context: PluginContext<'fut>,
     ) -> BoxFuture<'fut, ()> {
         let builder = ResultBuilderRef::create(plugin_id, builder);
         Box::pin(self.get_for_values_arc(input, builder, context))
     }
 
-    fn any_init(&mut self, context: Context) -> BoxFuture<'_, ()> {
+    fn any_init<'a>(&'a mut self, context: PluginContext<'a>) -> BoxFuture<'a, ()> {
         Box::pin(self.init(context))
     }
 
-    fn any_handle_pre(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {
+    fn any_handle_pre(
+        &self,
+        thing: CustomData,
+        action: &str,
+        context: PluginContext,
+    ) -> Task<Message> {
         self.handle_pre(thing, action, context)
     }
-    fn any_handle_post(&self, thing: CustomData, action: &str, context: Context) -> Task<Message> {
+    fn any_handle_post(
+        &self,
+        thing: CustomData,
+        action: &str,
+        context: PluginContext,
+    ) -> Task<Message> {
         self.handle_post(thing, action, context)
     }
 }

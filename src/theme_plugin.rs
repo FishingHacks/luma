@@ -3,8 +3,9 @@ use std::sync::LazyLock;
 use iced::{Task, Theme};
 
 use crate::{
-    Action, Context, CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput,
-    plugin::StringLike,
+    Action, CustomData, Entry, Message, PluginContext, ResultBuilderRef,
+    matcher::MatcherInput,
+    plugin::{StringLike, StructPlugin},
 };
 
 static THEMES: LazyLock<Vec<(String, Theme)>> = LazyLock::new(|| {
@@ -17,8 +18,8 @@ static THEMES: LazyLock<Vec<(String, Theme)>> = LazyLock::new(|| {
 #[derive(Default)]
 pub struct ThemePlugin;
 
-impl Plugin for ThemePlugin {
-    fn prefix(&self) -> &'static str {
+impl StructPlugin for ThemePlugin {
+    fn prefix() -> &'static str {
         "theme"
     }
 
@@ -26,7 +27,7 @@ impl Plugin for ThemePlugin {
         &self,
         input: &MatcherInput,
         builder: ResultBuilderRef<'_>,
-        _: Context,
+        _: PluginContext<'_>,
     ) {
         let iter = THEMES.iter().filter(|&v| input.matches(&v.0)).map(|v| {
             Entry::new(
@@ -38,9 +39,9 @@ impl Plugin for ThemePlugin {
         builder.commit(iter).await;
     }
 
-    async fn init(&mut self, _: Context) {}
+    async fn init(&mut self, _: PluginContext<'_>) {}
 
-    fn handle_pre(&self, thing: CustomData, _: &str, _: Context) -> iced::Task<Message> {
+    fn handle_pre(&self, thing: CustomData, _: &str, _: PluginContext<'_>) -> iced::Task<Message> {
         Task::done(Message::ChangeTheme(thing.into::<Theme>()))
     }
 

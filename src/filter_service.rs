@@ -20,7 +20,7 @@ use iced::{
 };
 use tokio::sync::RwLock;
 
-use crate::{AnyPlugin, Context, Entry, GenericEntry, matcher::MatcherInput};
+use crate::{AnyPlugin, Context, Entry, GenericEntry, PluginContext, matcher::MatcherInput};
 
 #[derive(Clone, Copy)]
 pub struct ResultBuilderRef<'a> {
@@ -223,7 +223,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                                     input,
                                     &result_builder,
                                     id,
-                                    context.clone(),
+                                    PluginContext::from_context(&context, plugin.any_prefix()),
                                 )];
                             }
                         }
@@ -237,7 +237,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                                     input.clone(),
                                     &result_builder,
                                     id,
-                                    context.clone(),
+                                    PluginContext::from_context(&context, plugin.any_prefix()),
                                 )
                             })
                             .collect::<Vec<_>>()

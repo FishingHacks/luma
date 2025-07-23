@@ -13,8 +13,8 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::{
-    Action, CustomData, Entry, Message, Plugin, cache::HTTPCache, filter_service::ResultBuilderRef,
-    matcher::MatcherInput, utils,
+    Action, CustomData, Entry, Message, StructPlugin, cache::HTTPCache,
+    filter_service::ResultBuilderRef, matcher::MatcherInput, utils,
 };
 
 #[derive(Default)]
@@ -49,11 +49,7 @@ impl fend_core::ExchangeRateFnV2 for ExchangeRateHandler {
     }
 }
 
-impl FendPlugin {
-    pub const PREFIX: &str = "fend";
-}
-
-impl Plugin for FendPlugin {
+impl StructPlugin for FendPlugin {
     fn actions(&self) -> &[Action] {
         const {
             &[
@@ -65,15 +61,15 @@ impl Plugin for FendPlugin {
         }
     }
 
-    fn prefix(&self) -> &'static str {
-        Self::PREFIX
+    fn prefix() -> &'static str {
+        "fend"
     }
 
     async fn get_for_values(
         &self,
         input: &MatcherInput,
         builder: ResultBuilderRef<'_>,
-        _: crate::Context,
+        _: crate::PluginContext<'_>,
     ) {
         // for some reason rust doesn't like this block not being here :< [it thinks the writer is
         // being dropped after the await, even tho it gets moved into the drop function?]
@@ -97,7 +93,12 @@ impl Plugin for FendPlugin {
             .await;
     }
 
-    fn handle_pre(&self, thing: CustomData, action: &str, _: crate::Context) -> Task<Message> {
+    fn handle_pre(
+        &self,
+        thing: CustomData,
+        action: &str,
+        _: crate::PluginContext<'_>,
+    ) -> Task<Message> {
         let v = thing.into::<Arc<str>>();
         match action {
             "copy" => clipboard::write(v.to_string()),
@@ -114,7 +115,7 @@ impl Plugin for FendPlugin {
         }
     }
 
-    async fn init(&mut self, ctx: crate::Context) {
+    async fn init(&mut self, ctx: crate::PluginContext<'_>) {
         self.0
             .write()
             .await

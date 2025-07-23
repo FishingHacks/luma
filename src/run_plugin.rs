@@ -8,8 +8,8 @@ use iced::{
 };
 
 use crate::{
-    Action, Context, CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput,
-    utils,
+    Action, CustomData, Entry, Message, PluginContext, ResultBuilderRef, StructPlugin,
+    matcher::MatcherInput, utils,
 };
 
 struct FileEntry {
@@ -25,20 +25,16 @@ pub struct RunPlugin {
     files: Vec<FileEntry>,
 }
 
-impl RunPlugin {
-    pub const PREFIX: &str = "run";
-}
-
-impl Plugin for RunPlugin {
-    fn prefix(&self) -> &'static str {
-        Self::PREFIX
+impl StructPlugin for RunPlugin {
+    fn prefix() -> &'static str {
+        "run"
     }
 
     async fn get_for_values(
         &self,
         input: &MatcherInput,
         builder: ResultBuilderRef<'_>,
-        _: Context,
+        _: PluginContext<'_>,
     ) {
         let iter = self
             .files
@@ -52,7 +48,7 @@ impl Plugin for RunPlugin {
         builder.commit(iter).await;
     }
 
-    async fn init(&mut self, _: Context) {
+    async fn init(&mut self, _: PluginContext<'_>) {
         let mut file_entries = Vec::new();
         let mut programs = HashSet::new();
         for dir in utils::APPLICATION_DIRS.iter() {
@@ -113,7 +109,12 @@ impl Plugin for RunPlugin {
         self.files = file_entries;
     }
 
-    fn handle_pre(&self, thing: CustomData, action: &str, _: Context) -> iced::Task<Message> {
+    fn handle_pre(
+        &self,
+        thing: CustomData,
+        action: &str,
+        _: PluginContext<'_>,
+    ) -> iced::Task<Message> {
         let file = &self.files[thing.into::<usize>()];
 
         if action == "run" {

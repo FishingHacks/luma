@@ -1,7 +1,7 @@
 use iced::Task;
 
 use crate::{
-    CustomData, Entry, Message, Plugin, ResultBuilderRef, matcher::MatcherInput,
+    CustomData, Entry, Message, ResultBuilderRef, matcher::MatcherInput, plugin::StructPlugin,
     special_windows::SpecialWindowState, utils,
 };
 
@@ -44,8 +44,8 @@ static ACTIONS: &[Action] = &[
 #[derive(Default)]
 pub struct ControlPlugin;
 
-impl Plugin for ControlPlugin {
-    fn prefix(&self) -> &'static str {
+impl StructPlugin for ControlPlugin {
+    fn prefix() -> &'static str {
         "control"
     }
 
@@ -53,7 +53,7 @@ impl Plugin for ControlPlugin {
         &self,
         input: &MatcherInput,
         builder: ResultBuilderRef<'_>,
-        _: crate::Context,
+        _: crate::PluginContext<'_>,
     ) {
         let iter = ACTIONS
             .iter()
@@ -68,9 +68,14 @@ impl Plugin for ControlPlugin {
         builder.commit(iter).await;
     }
 
-    async fn init(&mut self, _: crate::Context) {}
+    async fn init(&mut self, _: crate::PluginContext<'_>) {}
 
-    fn handle_pre(&self, thing: CustomData, _: &str, ctx: crate::Context) -> iced::Task<Message> {
+    fn handle_pre(
+        &self,
+        thing: CustomData,
+        _: &str,
+        ctx: crate::PluginContext<'_>,
+    ) -> iced::Task<Message> {
         match thing.into::<Action>() {
             Action::Quit => Task::done(Message::Exit),
             Action::Hide => Task::none(),
@@ -79,7 +84,7 @@ impl Plugin for ControlPlugin {
                 Task::none()
             }
             Action::OpenSettings => Task::done(Message::OpenSpecial(SpecialWindowState::settings(
-                Clone::clone(&*ctx.config),
+                Clone::clone(&*ctx.global_config),
             ))),
         }
     }

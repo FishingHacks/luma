@@ -1,6 +1,6 @@
 use iced::{
     Element, Length, Task,
-    widget::{button, checkbox, column, text, vertical_space},
+    widget::{button, checkbox, column, row, text, vertical_space},
     window,
 };
 
@@ -60,7 +60,7 @@ impl SettingsState {
             .map(|v| &v.0)
             .filter(|v| **v != "control")
         {
-            col = col.push(
+            let mut row = row![
                 checkbox(
                     plugin.clone(),
                     self.config.enabled_plugins.contains(plugin.to_str()),
@@ -68,7 +68,11 @@ impl SettingsState {
                 .on_toggle(move |v| {
                     (SettingsMessage::SetPluginEnabled(plugin.clone(), v), id).into()
                 }),
-            );
+            ];
+            if state.plugin_configs.contains_key(plugin) {
+                row = row.push(button("Edit Plugin Config"));
+            }
+            col = col.push(row);
         }
         col = col
             .push(vertical_space().width(Length::Fill).height(Length::Fill))
