@@ -206,7 +206,7 @@ impl IntoLua for &PluginSettingsValue {
                 }
                 mlua::Value::Table(table)
             }
-            PSV::Null => todo!(),
+            PSV::Null => mlua::Value::Nil,
         })
     }
 }
@@ -480,8 +480,9 @@ impl PluginSettingsHolder {
                 },
                 PSV::List(list),
             ) => {
-                list.iter_mut()
-                    .for_each(|v| result |= Self::apply_default(value_type, v));
+                for v in list.iter_mut() {
+                    result |= Self::apply_default(value_type, v);
+                }
                 if let Some(len) = max_entries
                     && list.len() > *len
                 {

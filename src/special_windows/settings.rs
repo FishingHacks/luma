@@ -83,6 +83,7 @@ impl SettingsState {
             .push(vertical_space().width(Length::Fill).height(Length::Fill))
             .push(row![
                 button("Save").on_press((SettingsMessage::Save, id).into()),
+                horizontal_space().width(10),
                 button("Discard").on_press((SettingsMessage::Discard, id).into())
             ]);
         col.into()

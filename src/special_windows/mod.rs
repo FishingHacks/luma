@@ -3,6 +3,7 @@ use settings::SettingsMessage;
 
 use crate::{Message, State};
 
+pub mod custom_settings;
 pub mod error_popup;
 pub mod settings;
 pub mod warning_popup;

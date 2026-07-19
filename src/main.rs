@@ -81,41 +81,6 @@ use tokio::{
 };
 use utils::CONFIG_FILE;
 
-// #[must_use]
-// pub fn make_config() -> Config {
-//     Config {
-//         files: Files {
-//             entries: vec![
-//                 FileWatcherEntry {
-//                     path: Path::new("/home/fishi").into(),
-//                     watch: true,
-//                     reindex_every: None,
-//                     filter: ScanFilter::default(),
-//                 },
-//                 // FileWatcherEntry {
-//                 //     path: Path::new("/").into(),
-//                 //     watch: false,
-//                 //     reindex_every: None,
-//                 //     filter: ScanFilter {
-//                 //         deny_paths: vec![
-//                 //             Path::new("/dev").into(),
-//                 //             Path::new("/proc").into(),
-//                 //             Path::new("/srv").into(),
-//                 //             Path::new("/sys").into(),
-//                 //             Path::new("/lost+found").into(),
-//                 //         ],
-//                 //         ..Default::default()
-//                 //     },
-//                 // },
-//             ],
-//             reindex_at_startup: false,
-//         },
-//         on_blur: BlurAction::Refocus,
-//         keybind: "Alt+P".into(),
-//         enabled_plugins: vec![],
-//     }
-// }
-
 #[derive(Clone, Debug)]
 pub struct MessageSender(Arc<RwLock<UnboundedSender<Message>>>);
 
@@ -861,7 +826,7 @@ impl State {
             {
                 log::error!("Config for plugin `{s}` is incorrect!");
             }
-            self.plugin_configs.insert(s.clone(), config);
+            self.plugin_configs.insert(s.clone(), config.into());
         }
         self.plugin_builder
             .push((s, Box::new(move || Box::new(value.clone()))));
@@ -878,7 +843,8 @@ impl State {
             {
                 log::error!("Config for plugin `{}` is incorrect!", T::prefix());
             }
-            self.plugin_configs.insert(T::prefix().into(), config);
+            self.plugin_configs
+                .insert(T::prefix().into(), config.into());
         }
     }
     pub fn add_lua_plugins(&mut self) {
