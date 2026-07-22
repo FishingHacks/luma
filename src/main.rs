@@ -35,7 +35,7 @@ use iced::{
         MouseArea, button, column, container, mouse_area, row, stack, text, text_input,
         vertical_space,
     },
-    window::{self, Level, Position, Settings},
+    window::{self, Level, Mode, Position, Settings},
 };
 use mlua::Lua;
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -190,6 +190,7 @@ pub enum Message {
     Click(usize),
     HideMainWindow,
     Hide(window::Id),
+    Closed(window::Id),
     Show,
     ChangeTheme(Theme),
     HandleAction {
@@ -222,7 +223,8 @@ pub struct State {
     selected: usize,
     offset: usize,
     text_input: text_input::Id,
-    window: Option<window::Id>,
+    window: window::Id,
+    window_showing: bool,
     plugins: Vec<Arc<dyn AnyPlugin>>,
     initializing_plugins: Vec<AbortHandle>,
     plugin_builder: Vec<(StringLike, PluginBuilder)>,
@@ -636,9 +638,6 @@ impl State {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        let Some(window_id) = self.window else {
-            unreachable!("the window update should always have a window")
-        };
         match message {
             Message::SetSearch(q) => {
                 self.search_query = q;
@@ -649,7 +648,7 @@ impl State {
                 if self.search_query.is_empty() {
                     return Task::batch([
                         task,
-                        set_window_height(window_id, BASE_SIZE, self.context.config.auto_resize),
+                        set_window_height(self.window, BASE_SIZE, self.context.config.auto_resize),
                     ]);
                 }
                 return task;
@@ -661,7 +660,7 @@ impl State {
                 self.hide_actions();
                 if self.search_query.is_empty() {
                     return set_window_height(
-                        window_id,
+                        self.window,
                         BASE_SIZE,
                         self.context.config.auto_resize,
                     );
@@ -715,6 +714,8 @@ impl State {
                 return self.run(index, 0);
             }
             Message::HideMainWindow => {
+                log::trace!("Hiding main window");
+                self.window_showing = false;
                 self.search_query.clear();
                 self.results.clear();
                 self.hide_actions();
@@ -725,25 +726,16 @@ impl State {
                 if let Some(v) = self.collector_controller.as_mut() {
                     v.stop();
                 }
-                self.window = None;
-                return iced::window::close(window_id);
+                return window::set_mode(self.window, Mode::Hidden);
             }
             Message::ChangeTheme(theme) => self.theme = theme,
-            Message::InputPress => {
-                let Some(window) = self.window else {
-                    return text_input::focus(self.text_input.clone());
-                };
-                return Task::batch([
-                    text_input::focus(self.text_input.clone()),
-                    window::drag(window),
-                ]);
-            }
+            Message::InputPress => return text_input::focus(self.text_input.clone()),
             Message::CollectorMessage(CollectorMessage::Finished(results)) => {
                 self.hide_actions();
                 self.results = results;
                 let new_height =
                     self.results.len().min(NUM_ENTRIES) as f32 * ENTRY_SIZE + BASE_SIZE;
-                return set_window_height(window_id, new_height, self.context.config.auto_resize);
+                return set_window_height(self.window, new_height, self.context.config.auto_resize);
             }
             Message::ShowActions => {
                 if self.results.is_empty() {
@@ -762,7 +754,7 @@ impl State {
                         NORESIZE_BASESIZE
                     };
                     let new_height = new_height + actions.len() as f32 * ACTION_SIZE;
-                    return set_window_height(window_id, new_height, true);
+                    return set_window_height(self.window, new_height, true);
                 }
             }
             Message::HideActions => {
@@ -772,10 +764,10 @@ impl State {
                 } else {
                     NORESIZE_BASESIZE
                 };
-                return set_window_height(window_id, new_height, true);
+                return set_window_height(self.window, new_height, true);
             }
-            Message::Blurred(id) if id == window_id => match self.context.config.on_blur {
-                BlurAction::Refocus => return window::gain_focus(window_id),
+            Message::Blurred(id) if id == self.window => match self.context.config.on_blur {
+                BlurAction::Refocus => return window::gain_focus(self.window),
                 BlurAction::None => {}
             },
             Message::Blurred(_) => {}
@@ -784,6 +776,7 @@ impl State {
             Message::Show
             | Message::OpenSpecial(_)
             | Message::Hide(_)
+            | Message::Closed(_)
             | Message::HandleAction { .. }
             | Message::None
             | Message::Exit
@@ -959,9 +952,7 @@ const NUM_ENTRIES: usize = 10;
 const NORESIZE_BASESIZE: f32 = BASE_SIZE + NUM_ENTRIES as f32 * ENTRY_SIZE;
 
 fn daemon_view(state: &State, id: window::Id) -> Element<'_, Message> {
-    if let Some(main_window_id) = state.window
-        && id == main_window_id
-    {
+    if id == state.window {
         return state.view().into();
     }
     if let Some(window_state) = state.special_windows.get(&id) {
@@ -981,42 +972,52 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             task
         }
         Message::Show => {
-            let mut settings = Settings {
-                resizable: false,
-                decorations: false,
-                level: Level::AlwaysOnTop,
-                position: Position::Centered,
-                ..Default::default()
-            };
-            settings.size.height = NORESIZE_BASESIZE;
-            if state.context.config.auto_resize {
-                settings.position = Position::SpecificWith(|winsize, resolution| {
-                    Point::new(
-                        (resolution.width - winsize.width).max(0.0) / 2.0,
-                        (resolution.height - BASE_SIZE - 12.0 * ENTRY_SIZE).max(0.0) / 2.0,
-                    )
-                });
-                settings.size.height = BASE_SIZE;
-            }
-            let (id, open_window_task) = window::open(settings);
-            let open_window_task = open_window_task.map(|_| Message::None);
-            log::trace!("opened main window with id {id:?}");
-            let old_window = state.window.replace(id);
+            log::trace!("showing main window with id {}", state.window);
             state.init_plugins();
-            let focus_task = text_input::focus(state.text_input.clone()).map(|()| Message::None);
-            match old_window {
-                Some(id) => Task::batch([window::close(id), open_window_task, focus_task]),
-                None => Task::batch([open_window_task, focus_task]),
-            }
+            state.window_showing = true;
+            Task::batch([
+                window::set_mode(state.window, Mode::Windowed),
+                text_input::focus(state.text_input.clone()),
+            ])
         }
         Message::Hide(window_id) => {
-            if let Some(id) = state.window
-                && window_id == id
-            {
+            if state.window == window_id {
                 return Task::done(Message::HideMainWindow);
             }
             state.special_windows.remove(&window_id);
             window::close(window_id)
+        }
+        Message::Closed(window_id) => {
+            if state.window == window_id {
+                log::debug!("recreating main window");
+
+                let mut settings = Settings {
+                    resizable: false,
+                    decorations: false,
+                    level: Level::AlwaysOnTop,
+                    position: Position::Centered,
+                    visible: false,
+                    ..Default::default()
+                };
+                settings.size.height = NORESIZE_BASESIZE;
+                if state.context.config.auto_resize {
+                    settings.position = Position::SpecificWith(|winsize, resolution| {
+                        Point::new(
+                            (resolution.width - winsize.width).max(0.0) / 2.0,
+                            (resolution.height - BASE_SIZE - 12.0 * ENTRY_SIZE).max(0.0) / 2.0,
+                        )
+                    });
+                    settings.size.height = BASE_SIZE;
+                }
+                let (id, open_window_task) = window::open(settings);
+                log::trace!("opened main window with id {id:?}");
+                state.window = id;
+
+                return open_window_task.discard();
+            }
+            state.special_windows.remove(&window_id);
+
+            Task::none()
         }
         Message::HandleAction {
             plugin,
@@ -1030,13 +1031,10 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             )
         }),
         Message::Exit => iced::exit(),
-        Message::None => Task::none(),
-        Message::IndexerMessage(FileIndexResponse::IndexFinished) if state.window.is_none() => {
-            Task::none()
-        }
-        Message::IndexerMessage(FileIndexResponse::IndexFinished) => {
+        Message::IndexerMessage(FileIndexResponse::IndexFinished) if state.window_showing => {
             Task::done(Message::ResultsUpdated)
         }
+        Message::IndexerMessage(FileIndexResponse::IndexFinished) | Message::None => Task::none(),
         Message::IndexerMessage(FileIndexResponse::Starting(sender)) => {
             sender
                 .send(FileIndexMessage::SetFileIndex(
@@ -1068,7 +1066,7 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             if save {
                 state.save_config();
             }
-            if state.window.is_some() {
+            if state.window_showing {
                 state.update_matches();
             }
             if let Some(sender) = state.index_sender.as_ref() {
@@ -1084,18 +1082,18 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 log::error!("failed to register hotkey: {e}");
             }
             state.hotkey = hotkey;
-            let Some(id) = state.window else {
+            if !state.window_showing {
                 return Task::none();
-            };
+            }
             if state.context.config.auto_resize {
                 let mut new_height =
                     state.results.len().min(NUM_ENTRIES) as f32 * ENTRY_SIZE + BASE_SIZE;
                 if state.showing_actions {
                     new_height += state.get_actions().len() as f32 * ACTION_SIZE;
                 }
-                set_window_height(id, new_height, true)
+                set_window_height(state.window, new_height, true)
             } else {
-                set_window_height(id, NORESIZE_BASESIZE, true)
+                set_window_height(state.window, NORESIZE_BASESIZE, true)
             }
         }
         Message::GetContext(sender) => {
@@ -1131,8 +1129,8 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 Task::none()
             }
         }
-        _ if state.window.is_none() => Task::none(),
-        _ => state.update(message),
+        _ if state.window_showing => state.update(message),
+        _ => Task::none(),
     }
 }
 
@@ -1203,7 +1201,8 @@ fn main() -> iced::Result {
                 selected: 0,
                 text_input: text_input_id.clone(),
                 offset: 0,
-                window: None,
+                window: window::Id::unique(),
+                window_showing: false,
                 plugins: Vec::new(),
                 plugin_builder: Vec::new(),
                 theme: Theme::Dracula,
@@ -1239,7 +1238,11 @@ fn main() -> iced::Result {
                 async move { http_cache.read().await.init(sqlite).await },
                 |_| Message::None,
             );
-            (state, Task::batch([focus_task, http_cache_init_task]))
+            let recreate_window = Task::done(Message::Closed(state.window));
+            (
+                state,
+                Task::batch([focus_task, http_cache_init_task, recreate_window]),
+            )
         },
         daemon_update,
         daemon_view,
@@ -1249,7 +1252,7 @@ fn main() -> iced::Result {
         Subscription::batch([
             window::events().map(|ev| match ev.1 {
                 window::Event::Unfocused => Message::Blurred(ev.0),
-                window::Event::Closed => Message::Hide(ev.0),
+                window::Event::Closed => Message::Closed(ev.0),
                 _ => Message::None,
             }),
             hotkey_sub().map(Message::HotkeyPressed),
