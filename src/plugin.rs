@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::ops::{Bound, Deref, Range, RangeBounds};
@@ -21,6 +22,12 @@ pub enum StringLike {
     SharedStr(Arc<str>, Range<u16>),
     SharedPath(Arc<Path>, Range<u16>),
     Empty,
+}
+
+impl Borrow<str> for StringLike {
+    fn borrow(&self) -> &str {
+        self.to_str()
+    }
 }
 
 impl ToSql for StringLike {

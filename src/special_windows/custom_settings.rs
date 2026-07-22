@@ -1,8 +1,11 @@
 use std::rc::Rc;
 
-use iced::{Element, window};
+use iced::{Element, widget::text, window};
 
-use crate::{State, config::PluginSettingsValue};
+use crate::{
+    State,
+    config::{PluginSettings, PluginSettingsValue},
+};
 
 #[derive(Debug)]
 pub struct CustomSettingsState {
@@ -11,7 +14,7 @@ pub struct CustomSettingsState {
     changed: bool,
 }
 
-enum StringOrUsize {
+pub enum StringOrUsize {
     Str(Rc<str>),
     Usize(usize),
 }
@@ -33,6 +36,9 @@ impl CustomSettingsState {
     }
 
     pub fn view<'a>(&self, id: window::Id, state: &'a State) -> Element<'a, ()> {
+        let Some(settings) = state.plugin_configs.get(&*self.plugin) else {
+            return text("Error: Could not locate settings for plugin").into();
+        };
         todo!()
     }
 

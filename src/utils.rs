@@ -228,7 +228,7 @@ pub static DESKTOP_FILE_INFO_CACHE: LazyLock<RwLock<DesktopFileCache>> = LazyLoc
             };
             Ok((file, result.try_into()?))
         },
-        Duration::from_secs(5 * 60),
+        Duration::from_mins(5),
     ))
 });
 

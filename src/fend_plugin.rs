@@ -28,7 +28,7 @@ impl Interrupt for ResultBuilderRef<'_> {
     }
 }
 
-const REFRESH_TIMEOUT: Duration = /* 24 hours*/ Duration::from_secs(60 * 60 * 24);
+const REFRESH_TIMEOUT: Duration = Duration::from_hours(24);
 
 static GETTING_CURRENCIES: AtomicBool = AtomicBool::new(false);
 static CURRENCIES: LazyLock<RwLock<HashMap<String, f64>>> = LazyLock::new(<_>::default);

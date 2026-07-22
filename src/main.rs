@@ -826,7 +826,7 @@ impl State {
             {
                 log::error!("Config for plugin `{s}` is incorrect!");
             }
-            self.plugin_configs.insert(s.clone(), config.into());
+            self.plugin_configs.insert(s.clone(), config);
         }
         self.plugin_builder
             .push((s, Box::new(move || Box::new(value.clone()))));
@@ -843,8 +843,7 @@ impl State {
             {
                 log::error!("Config for plugin `{}` is incorrect!", T::prefix());
             }
-            self.plugin_configs
-                .insert(T::prefix().into(), config.into());
+            self.plugin_configs.insert(T::prefix().into(), config);
         }
     }
     pub fn add_lua_plugins(&mut self) {
@@ -1319,7 +1318,7 @@ fn cache_clear_sub() -> Subscription<Message> {
             };
             loop {
                 cache::clean_caches(&context).await;
-                tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+                tokio::time::sleep(Duration::from_mins(10)).await;
             }
         })
     })

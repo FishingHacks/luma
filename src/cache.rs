@@ -236,8 +236,8 @@ impl HTTPCache {
 
     pub fn new() -> Self {
         HTTPCache {
-            default_ttl: Duration::from_secs(60 * 10),
-            in_memory_cache_ttl: Duration::from_secs(120),
+            default_ttl: Duration::from_mins(10),
+            in_memory_cache_ttl: Duration::from_mins(2),
             in_memory_cache: RwLock::default(),
             client: reqwest::Client::new(),
             waiting: <_>::default(),
