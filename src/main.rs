@@ -102,6 +102,11 @@ impl MessageSender {
         let _: Result<_, _> = self.0.read().await.send(message);
     }
 
+    /// sends a message if the channel is open and ignores if it it's closed
+    pub fn send_sync(&self, message: Message) {
+        let _: Result<_, _> = self.0.blocking_read().send(message);
+    }
+
     async fn replace(&self, new_sender: UnboundedSender<Message>) {
         *self.0.write().await = new_sender;
     }
@@ -215,6 +220,7 @@ pub enum Message {
     OpenSpecial(SpecialWindowState),
     IndexerMessage(FileIndexResponse),
     HotkeyPressed(GlobalHotKeyEvent),
+    ReindexAllFiles,
 }
 
 type PluginBuilder = Box<dyn FnMut() -> Box<dyn AnyPlugin>>;
@@ -317,6 +323,7 @@ impl Action {
     }
 }
 
+#[must_use]
 pub fn format_key(key: &Key, modifiers: Modifiers) -> String {
     use std::fmt::Write;
     let mut s = String::new();
@@ -785,6 +792,7 @@ impl State {
             | Message::HandleAction { .. }
             | Message::None
             | Message::Exit
+            | Message::ReindexAllFiles
             | Message::IndexerMessage(_)
             | Message::GetContext(_)
             | Message::UpdateConfig(..)
@@ -1139,6 +1147,17 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
                 Task::none()
             }
         }
+        Message::ReindexAllFiles => {
+            let sender = state.index_sender.as_ref().expect("index sender missing");
+            for e in &state.context.config.files.entries {
+                match sender.send(FileIndexMessage::Reindex(e.path.0.clone())) {
+                    Ok(()) => (),
+                    // index sender exited
+                    Err(_) => break,
+                }
+            }
+            Task::none()
+        }
         _ if state.window_showing => state.update(message),
         _ => Task::none(),
     }
@@ -1172,7 +1191,7 @@ fn load_config() -> Option<Config> {
 
 fn main() -> iced::Result {
     logging::init();
-    log::info!("--- New Run ---");
+    log::debug!("--- New Run ---");
     let Some(config) = load_config() else {
         return Ok(());
     };

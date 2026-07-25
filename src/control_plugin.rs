@@ -11,6 +11,7 @@ pub enum Action {
     Hide,
     ShowLogs,
     OpenSettings,
+    ReindexFiles,
 }
 
 impl Action {
@@ -20,6 +21,7 @@ impl Action {
             Action::Hide => "hide",
             Action::ShowLogs => "logs",
             Action::OpenSettings => "settings",
+            Action::ReindexFiles => "reindex",
         }
     }
     pub const fn get_description(self) -> &'static str {
@@ -30,15 +32,17 @@ impl Action {
             Action::Hide => "Hides the window",
             Action::ShowLogs => "Open the latest application logs",
             Action::OpenSettings => "Open the settings",
+            Action::ReindexFiles => "Reindex all files",
         }
     }
 }
 
 static ACTIONS: &[Action] = &[
+    Action::OpenSettings,
+    Action::ReindexFiles,
+    Action::ShowLogs,
     Action::Quit,
     Action::Hide,
-    Action::ShowLogs,
-    Action::OpenSettings,
 ];
 
 #[derive(Default)]
@@ -84,6 +88,10 @@ impl StructPlugin for ControlPlugin {
             Action::OpenSettings => Task::done(Message::OpenSpecial(SpecialWindowState::settings(
                 Clone::clone(&*ctx.global_config),
             ))),
+            Action::ReindexFiles => {
+                ctx.message_sender.send_sync(Message::ReindexAllFiles);
+                Task::none()
+            }
         }
     }
 

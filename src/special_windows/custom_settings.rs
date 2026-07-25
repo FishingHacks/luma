@@ -428,33 +428,24 @@ impl PluginSettings {
                 let len = v.len();
                 let col = column([left_widget, space().height(5).into()])
                     .extend(v.iter().enumerate().map(|(i, value)| {
-                        let mut row = row![];
-
-                        if i != 0 {
+                        let up_msg = (i != 0).then(|| {
                             let up_msg = CustomSettingsMessage::ListOp {
                                 path: path.clone(),
                                 op: ListOp::MoveUp(i),
                             };
-                            let up_msg = Message::SpecialWindow(
-                                SpecialWindowMessage::CustomSettings(up_msg),
-                                id,
-                            );
+                            Message::SpecialWindow(SpecialWindowMessage::CustomSettings(up_msg), id)
+                        });
 
-                            row = row.push(button(text("▲")).on_press(up_msg));
-                        }
-
-                        if i < len - 1 {
+                        let down_msg = (i < len - 1).then(|| {
                             let down_msg = CustomSettingsMessage::ListOp {
                                 path: path.clone(),
                                 op: ListOp::MoveDown(i),
                             };
-                            let down_msg = Message::SpecialWindow(
+                            Message::SpecialWindow(
                                 SpecialWindowMessage::CustomSettings(down_msg),
                                 id,
-                            );
-
-                            row = row.push(button(text("▼")).on_press(down_msg));
-                        }
+                            )
+                        });
 
                         let remove_msg = CustomSettingsMessage::ListOp {
                             path: path.clone(),
@@ -465,15 +456,19 @@ impl PluginSettings {
                             id,
                         );
 
-                        row.push(button(text("remove")).on_press(remove_msg))
-                            .push(value_type.view(
+                        row![
+                            button(text("▲")).on_press_maybe(up_msg),
+                            button(text("▼")).on_press_maybe(down_msg),
+                            button(text("remove")).on_press(remove_msg),
+                            value_type.view(
                                 value,
                                 id,
                                 path_with(&path, StringOrUsize::Usize(i)),
                                 widget_states,
-                            ))
-                            .spacing(12)
-                            .into()
+                            )
+                        ]
+                        .spacing(12)
+                        .into()
                     }))
                     .spacing(7);
 
