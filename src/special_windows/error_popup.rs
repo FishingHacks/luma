@@ -1,7 +1,7 @@
 use iced::{
     Color, Element, Length,
     alignment::{Horizontal, Vertical},
-    widget::{button, column, container, row, svg, text, vertical_space},
+    widget::{button, column, container, row, space, svg, text},
     window,
 };
 
@@ -33,7 +33,7 @@ impl State {
         .height(Length::Shrink);
         column![
             row,
-            vertical_space().height(Length::Fill),
+            space().height(Length::Fill),
             container(button("Ok").on_press(Message::Hide(id)))
                 .align_x(Horizontal::Center)
                 .width(Length::Fill),

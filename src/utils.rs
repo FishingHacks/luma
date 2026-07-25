@@ -257,4 +257,25 @@ pub static DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     buf
 });
 
-pub static CONFIG_FILE: LazyLock<PathBuf> = LazyLock::new(|| CONFIG_DIR.join("config.toml"));
+pub static STATE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    let mut buf = if let Some(value) = std::env::var_os("XDG_STATE_HOME") {
+        PathBuf::from(value)
+    } else {
+        let mut buf = HOME_DIR.clone();
+        buf.push(".local");
+        buf.push("state");
+        buf
+    };
+    buf.push(CRATE_NAME);
+    buf
+});
+
+pub static RUNTIME_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+    let mut buf = if let Some(value) = std::env::var_os("XDG_RUNTIME_DIR") {
+        PathBuf::from(value)
+    } else {
+        PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() }))
+    };
+    buf.push(CRATE_NAME);
+    buf
+});

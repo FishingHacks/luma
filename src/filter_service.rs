@@ -202,8 +202,14 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                     let settings_ref = context.config.plugin_settings.as_ref_async().await;
                     let mut futures = 'block: {
                         for (id, plugin) in plugins.iter().enumerate() {
-                            if query.starts_with(plugin.any_prefix()) {
-                                query.drain(..plugin.any_prefix().len());
+                            let mut prefix = "";
+                            for p in plugin.any_prefixes() {
+                                if prefix.len() < p.len() && query.starts_with(&**p) {
+                                    prefix = p;
+                                }
+                            }
+                            if !prefix.is_empty() {
+                                query.drain(..prefix.len());
                                 let input = Arc::new(MatcherInput::new(query, true));
                                 break 'block vec![plugin.any_get_for_values(
                                     input,
@@ -211,7 +217,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                                     id,
                                     PluginContext::from_context(
                                         &context,
-                                        settings_ref.get_root(plugin.any_prefix()),
+                                        settings_ref.get_root(&plugin.any_prefixes()[0]),
                                     ),
                                 )];
                             }
@@ -228,7 +234,7 @@ pub fn collector() -> impl Stream<Item = CollectorMessage> {
                                     id,
                                     PluginContext::from_context(
                                         &context,
-                                        settings_ref.get_root(plugin.any_prefix()),
+                                        settings_ref.get_root(&plugin.any_prefixes()[0]),
                                     ),
                                 )
                             })

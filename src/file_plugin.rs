@@ -9,7 +9,7 @@ use iced::{
 
 use crate::{
     Action, CustomData, Entry, Message, PluginContext, ResultBuilderRef, StructPlugin,
-    matcher::MatcherInput, plugin::StringLike, utils,
+    matcher::MatcherInput, plugin::StringLike, prefix, utils,
 };
 
 #[derive(Default)]
@@ -42,9 +42,7 @@ fn iter<'a>(
 }
 
 impl StructPlugin for FilePlugin {
-    fn prefix() -> &'static str {
-        "file"
-    }
+    prefix!("file");
 
     async fn get_for_values(
         &self,

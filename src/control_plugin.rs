@@ -2,7 +2,7 @@ use iced::Task;
 
 use crate::{
     CustomData, Entry, Message, ResultBuilderRef, matcher::MatcherInput, plugin::StructPlugin,
-    special_windows::SpecialWindowState, utils,
+    prefix, special_files::LOG_FILE, special_windows::SpecialWindowState, utils,
 };
 
 #[derive(Clone, Copy)]
@@ -45,9 +45,7 @@ static ACTIONS: &[Action] = &[
 pub struct ControlPlugin;
 
 impl StructPlugin for ControlPlugin {
-    fn prefix() -> &'static str {
-        "control"
-    }
+    prefix!("control", "luma", "?", "help", "/");
 
     async fn get_for_values(
         &self,
@@ -80,7 +78,7 @@ impl StructPlugin for ControlPlugin {
             Action::Quit => Task::done(Message::Exit),
             Action::Hide => Task::none(),
             Action::ShowLogs => {
-                utils::open_file(&**crate::logging::LOG_FILE);
+                utils::open_file(LOG_FILE.as_path());
                 Task::none()
             }
             Action::OpenSettings => Task::done(Message::OpenSpecial(SpecialWindowState::settings(

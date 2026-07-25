@@ -1,9 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
-    path::{Path, PathBuf},
+    path::Path,
     pin::pin,
-    sync::{Arc, LazyLock},
+    sync::Arc,
     task::Poll,
     time::{Duration, Instant, SystemTime},
 };
@@ -27,7 +27,7 @@ use tokio::{
 
 use crate::{
     config::{ArcPath, Config, FileWatcherEntry, ScanFilter},
-    utils::{self, CONFIG_FILE},
+    special_files::{CONFIG_FILE, FILE_INDEX_FILE},
 };
 
 #[derive(Clone)]
@@ -358,20 +358,17 @@ async fn main_loop(
     result
 }
 
-pub static INDEX_FILE_DIR: LazyLock<PathBuf> =
-    LazyLock::new(|| utils::DATA_DIR.join("file_index.toml"));
-
 async fn load_fileindex(
     event_handler: impl Fn(Result<notify::Event, notify::Error>) + Send + 'static,
     file_index: &RwLock<FileIndex>,
 ) -> bool {
-    let children = if let Ok(data) = tokio::fs::read_to_string(&*INDEX_FILE_DIR).await {
+    let children = if let Ok(data) = tokio::fs::read_to_string(FILE_INDEX_FILE.as_path()).await {
         match toml::from_str(&data) {
             Ok(v) => v,
             Err(e) => {
                 log::error!(
                     "Failed to read the file index: {e:?}. you can either delete or fix up the file index at {}.",
-                    INDEX_FILE_DIR.display()
+                    FILE_INDEX_FILE.display()
                 );
                 return false;
             }
@@ -401,14 +398,14 @@ async fn update_file_index(index: &RwLock<FileIndex>) -> bool {
             return false;
         }
     };
-    let parent = INDEX_FILE_DIR
+    let parent = FILE_INDEX_FILE
         .parent()
         .expect("A file should always have a parent");
     if let Err(e) = tokio::fs::create_dir_all(parent).await {
         log::error!("Failed to create the path {}: {e:?}", parent.display());
         return false;
     }
-    if let Err(e) = tokio::fs::write(&*INDEX_FILE_DIR, string).await {
+    if let Err(e) = tokio::fs::write(FILE_INDEX_FILE.as_path(), string).await {
         log::error!("Failed to write the file index: {e:?}");
         return false;
     }

@@ -32,8 +32,9 @@ use iced::{
     mouse::ScrollDelta,
     stream::channel,
     widget::{
-        MouseArea, button, column, container, mouse_area, row, stack, text, text_input,
-        vertical_space,
+        self, MouseArea, button, column, container, mouse_area,
+        operation::{focus, move_cursor_to_end},
+        row, space, stack, text,
     },
     window::{self, Level, Mode, Position, Settings},
 };
@@ -62,6 +63,7 @@ mod plugin;
 mod plugin_settings;
 mod run_plugin;
 mod search_input;
+mod special_files;
 mod special_windows;
 mod sqlite;
 mod theme_plugin;
@@ -79,7 +81,8 @@ use tokio::{
     },
     task::AbortHandle,
 };
-use utils::CONFIG_FILE;
+
+use crate::special_files::CONFIG_FILE;
 
 #[derive(Clone, Debug)]
 pub struct MessageSender(Arc<RwLock<UnboundedSender<Message>>>);
@@ -171,7 +174,7 @@ pub struct SharedAnyPlugin(Arc<dyn AnyPlugin>);
 impl Debug for SharedAnyPlugin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("[any plugin ")?;
-        f.write_str(self.0.any_prefix())?;
+        f.write_str(&self.0.any_prefixes()[0])?;
         f.write_str("]")
     }
 }
@@ -222,7 +225,7 @@ pub struct State {
     results: Vec<GenericEntry>,
     selected: usize,
     offset: usize,
-    text_input: text_input::Id,
+    text_input: widget::Id,
     window: window::Id,
     window_showing: bool,
     plugins: Vec<Arc<dyn AnyPlugin>>,
@@ -314,11 +317,12 @@ impl Action {
     }
 }
 
-pub fn format_key(key: &Key, modifiers: Modifiers, s: &mut String) {
+pub fn format_key(key: &Key, modifiers: Modifiers) -> String {
     use std::fmt::Write;
+    let mut s = String::new();
 
     if matches!(key, Key::Unidentified) {
-        return;
+        return s;
     }
     if Modifiers::CTRL.intersects(modifiers) {
         s.push_str("Ctrl + ");
@@ -347,6 +351,8 @@ pub fn format_key(key: &Key, modifiers: Modifiers, s: &mut String) {
         Key::Character(c) => s.push_str(c.as_str()),
         Key::Unidentified => s.push_str("unknown key"),
     }
+
+    s
 }
 
 #[must_use]
@@ -385,12 +391,8 @@ fn set_window_height(window_id: window::Id, new_height: f32, resize: bool) -> Ta
     if !resize {
         return Task::none();
     }
-    window::get_size(window_id).then(move |size| {
-        Task::batch([
-            window::resize(window_id, Size::new(size.width, new_height)),
-            Task::done(Message::None),
-        ])
-    })
+    window::size(window_id)
+        .then(move |size| window::resize(window_id, Size::new(size.width, new_height)))
 }
 
 impl State {
@@ -413,7 +415,7 @@ impl State {
             if index >= self.results.len() {
                 if !self.context.config.auto_resize {
                     col = col.push(
-                        vertical_space()
+                        space()
                             .height(Length::Fixed(ENTRY_SIZE))
                             .width(Length::Fill),
                     );
@@ -427,7 +429,7 @@ impl State {
                 text(
                     self.plugins
                         .get(entry.plugin)
-                        .map(|v| v.any_prefix())
+                        .map(|v| &*v.any_prefixes()[0])
                         .unwrap_or_default(),
                 )
                 .size(16)
@@ -437,7 +439,7 @@ impl State {
                     text(
                         self.plugins
                             .get(entry.plugin)
-                            .map(|v| v.any_prefix())
+                            .map(|v| &*v.any_prefixes()[0])
                             .unwrap_or_default()
                     )
                     .size(16)
@@ -471,8 +473,8 @@ impl State {
                 let description = if matches!(action.shortcut.1, Key::Unidentified) {
                     row![text(&action.name).size(16).style(text::default)].spacing(10)
                 } else {
-                    let mut s = String::new();
-                    format_key(&action.shortcut.1, action.shortcut.0, &mut s);
+                    let s = format_key(&action.shortcut.1, action.shortcut.0);
+
                     row![
                         text(&action.name).size(16).style(text::default),
                         key_element(s.into())
@@ -501,8 +503,8 @@ impl State {
         {
             None => (None, None, None),
             Some(action) => {
-                let mut s = String::new();
-                format_key(&action.shortcut.1, action.shortcut.0, &mut s);
+                let s = format_key(&action.shortcut.1, action.shortcut.0);
+
                 (
                     Some(text(&action.name).size(16)),
                     Some(key_element(s.into())),
@@ -513,9 +515,9 @@ impl State {
         col = col.push(
             container(
                 row::Row::new()
-                    .push_maybe(action_text)
-                    .push_maybe(action_key)
-                    .push_maybe(action_seperator)
+                    .push(action_text)
+                    .push(action_key)
+                    .push(action_seperator)
                     .push(text("Actions").size(16))
                     .push(key_element("Alt".into()))
                     .push(text("•").size(16))
@@ -590,7 +592,7 @@ impl State {
                 plugin.any_handle_pre(
                     entry.data.clone(),
                     &action.id,
-                    plugin_ctx_from_ctx!(self.context, plugin.any_prefix()),
+                    plugin_ctx_from_ctx!(self.context, &plugin.any_prefixes()[0]),
                 ),
                 Task::done(Message::HideMainWindow),
                 Task::done(Message::HandleAction {
@@ -604,12 +606,12 @@ impl State {
                 plugin.any_handle_pre(
                     entry.data.clone(),
                     &action.id,
-                    plugin_ctx_from_ctx!(self.context, plugin.any_prefix()),
+                    plugin_ctx_from_ctx!(self.context, &plugin.any_prefixes()[0]),
                 ),
                 plugin.any_handle_post(
                     entry.data.clone(),
                     &action.id,
-                    plugin_ctx_from_ctx!(self.context, plugin.any_prefix()),
+                    plugin_ctx_from_ctx!(self.context, &plugin.any_prefixes()[0]),
                 ),
             ])
         }
@@ -644,7 +646,7 @@ impl State {
                 self.update_matches();
                 self.selected = 0;
                 self.hide_actions();
-                let task = text_input::move_cursor_to_end(self.text_input.clone());
+                let task = move_cursor_to_end(self.text_input.clone());
                 if self.search_query.is_empty() {
                     return Task::batch([
                         task,
@@ -729,7 +731,10 @@ impl State {
                 return window::set_mode(self.window, Mode::Hidden);
             }
             Message::ChangeTheme(theme) => self.theme = theme,
-            Message::InputPress => return text_input::focus(self.text_input.clone()),
+            Message::InputPress if !self.window_showing => return Task::none(),
+            Message::InputPress => {
+                return Task::batch([focus(self.text_input.clone()), window::drag(self.window)]);
+            }
             Message::CollectorMessage(CollectorMessage::Finished(results)) => {
                 self.hide_actions();
                 self.results = results;
@@ -798,9 +803,10 @@ impl State {
 
     #[must_use]
     pub fn get_plugin(&self, s: &str) -> Option<&dyn AnyPlugin> {
+        let s = Cow::Borrowed(s);
         self.plugins
             .iter()
-            .find(|v| v.any_prefix() == s)
+            .find(|v| v.any_prefixes().contains(&s))
             .map(|v| &**v)
     }
 
@@ -825,18 +831,21 @@ impl State {
             .push((s, Box::new(move || Box::new(value.clone()))));
     }
     pub fn add_plugin<T: StructPlugin>(&mut self) {
-        self.plugin_builder
-            .push((T::prefix().into(), Box::new(|| Box::new(T::default()))));
+        self.plugin_builder.push((
+            (&*T::prefixes()[0]).into(),
+            Box::new(|| Box::new(T::default())),
+        ));
         if let Some(config) = T::config() {
             if self
                 .context
                 .config
                 .plugin_settings
-                .apply_defaults(T::prefix(), &config)
+                .apply_defaults(&T::prefixes()[0], &config)
             {
-                log::error!("Config for plugin `{}` is incorrect!", T::prefix());
+                log::error!("Config for plugin `{}` is incorrect!", T::prefixes()[0]);
             }
-            self.plugin_configs.insert(T::prefix().into(), config);
+            self.plugin_configs
+                .insert((&*T::prefixes()[0]).into(), config);
         }
     }
     pub fn add_lua_plugins(&mut self) {
@@ -855,8 +864,8 @@ impl State {
             if ext != "lua" {
                 continue;
             }
-            let stem = Arc::<str>::from(stem);
-            match lua::load_lua_plugin(&self.lua, path, stem.clone()) {
+            let stem: Arc<str> = stem.into();
+            match lua::load_lua_plugin(&self.lua, path, stem.to_string()) {
                 Ok(v) => self.add_plugin_instance(v, stem),
                 Err(e) => {
                     log::error!("Failed to load plugin {stem:?}: {e}");
@@ -873,14 +882,14 @@ impl State {
         self.plugins.clear();
         for plugin_builder in self.plugin_builder.iter_mut().map(|(_, v)| v) {
             let mut plugin = plugin_builder();
-            let prefix = plugin.any_prefix();
+            let prefix = &plugin.any_prefixes()[0];
             if prefix != "control"
                 && !self
                     .context
                     .config
                     .enabled_plugins
                     .iter()
-                    .any(|v| v == prefix)
+                    .any(|v| *v == *prefix)
             {
                 continue;
             }
@@ -896,7 +905,7 @@ impl State {
                                 .plugin_settings
                                 .as_ref_async()
                                 .await
-                                .get_root(plugin.any_prefix()),
+                                .get_root(&plugin.any_prefixes()[0]),
                         ))
                         .await;
                     sender
@@ -930,7 +939,7 @@ impl State {
             );
             return;
         }
-        if let Err(e) = std::fs::write(&*CONFIG_FILE, s) {
+        if let Err(e) = std::fs::write(CONFIG_FILE.as_path(), s) {
             log::error!(
                 "Failed to save config: Failed to write {}: {e}",
                 CONFIG_FILE.display()
@@ -977,7 +986,8 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             state.window_showing = true;
             Task::batch([
                 window::set_mode(state.window, Mode::Windowed),
-                text_input::focus(state.text_input.clone()),
+                window::gain_focus(state.window),
+                focus(state.text_input.clone()),
             ])
         }
         Message::Hide(window_id) => {
@@ -1027,7 +1037,7 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             plugin.any_handle_post(
                 data,
                 &action,
-                plugin_ctx_from_ctx!(state.context, plugin.any_prefix()),
+                plugin_ctx_from_ctx!(state.context, &plugin.any_prefixes()[0]),
             )
         }),
         Message::Exit => iced::exit(),
@@ -1120,7 +1130,7 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             };
             log::trace!("Opened special window {window_state:?} {id:?}");
             state.special_windows.insert(id, window_state);
-            task.map(|_| Message::None)
+            task.discard()
         }
         Message::HotkeyPressed(ev) => {
             if ev.state() == HotKeyState::Pressed && ev.id == state.hotkey.id {
@@ -1138,12 +1148,12 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
 const DEFAULT_CONFIG: &str = "keybind = \"ctrl+space\"";
 
 fn load_config() -> Option<Config> {
-    let content = match std::fs::read_to_string(&*CONFIG_FILE) {
+    let content = match std::fs::read_to_string(CONFIG_FILE.as_path()) {
         Ok(v) => v,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // default config :3
             _ = std::fs::create_dir_all(CONFIG_FILE.parent().unwrap());
-            _ = std::fs::write(&*CONFIG_FILE, DEFAULT_CONFIG);
+            _ = std::fs::write(CONFIG_FILE.as_path(), DEFAULT_CONFIG);
             DEFAULT_CONFIG.to_string()
         }
         Err(e) => {
@@ -1194,7 +1204,7 @@ fn main() -> iced::Result {
 
     iced::daemon(
         move || {
-            let text_input_id = text_input::Id::unique();
+            let text_input_id = widget::Id::unique();
             let mut state = State {
                 search_query: String::new(),
                 results: Vec::new(),
@@ -1231,13 +1241,11 @@ fn main() -> iced::Result {
             state.add_plugin::<RunPlugin>();
             state.add_lua_plugins();
             state.add_plugin::<FilePlugin>();
-            let focus_task = text_input::focus(text_input_id);
+            let focus_task = focus(text_input_id);
             let http_cache = state.context.http_cache.clone();
             let sqlite = sqlite.clone();
-            let http_cache_init_task = Task::perform(
-                async move { http_cache.read().await.init(sqlite).await },
-                |_| Message::None,
-            );
+            let http_cache_init_task =
+                Task::future(async move { http_cache.read().await.init(sqlite).await }).discard();
             let recreate_window = Task::done(Message::Closed(state.window));
             (
                 state,
@@ -1247,7 +1255,7 @@ fn main() -> iced::Result {
         daemon_update,
         daemon_view,
     )
-    .theme(|s, _| s.theme.clone())
+    .theme(|s: &State, _| s.theme.clone())
     .subscription(move |_| {
         Subscription::batch([
             window::events().map(|ev| match ev.1 {

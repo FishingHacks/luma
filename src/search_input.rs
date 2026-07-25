@@ -7,10 +7,7 @@ use iced::{
     },
     keyboard::{self, Key, Modifiers, key::Named},
     mouse,
-    widget::{
-        TextInput,
-        text_input::{self, Id},
-    },
+    widget::{Id, TextInput, text_input},
 };
 
 use crate::{ALLOWED_ACTION_MODIFIERS, Message};
@@ -37,12 +34,12 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
     }
 
     fn layout(
-        &self,
+        &mut self,
         tree: &mut Tree,
         renderer: &Renderer,
         limits: &iced::advanced::layout::Limits,
     ) -> iced::advanced::layout::Node {
-        Widget::layout(&self.0, tree, renderer, limits)
+        Widget::layout(&mut self.0, tree, renderer, limits)
     }
 
     fn draw(
@@ -77,7 +74,7 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
     }
 
     fn operate(
-        &self,
+        &mut self,
         state: &mut Tree,
         layout: Layout<'_>,
         renderer: &Renderer,

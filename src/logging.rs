@@ -1,8 +1,7 @@
 use std::{
     fs::OpenOptions,
-    path::PathBuf,
     process::Command,
-    sync::{LazyLock, OnceLock, RwLock},
+    sync::{OnceLock, RwLock},
 };
 
 use env_logger::{Target, WriteStyle};
@@ -10,6 +9,7 @@ use log::{Level, LevelFilter, Log, Metadata, Record};
 
 use crate::{
     Message,
+    special_files::LOG_FILE,
     special_windows::SpecialWindowState,
     utils::{self, CRATE_NAME},
 };
@@ -21,7 +21,6 @@ pub struct Logger {
 
 #[allow(clippy::type_complexity)]
 static SENDER: OnceLock<RwLock<Box<dyn Send + Sync + FnMut(Message)>>> = OnceLock::new();
-pub static LOG_FILE: LazyLock<PathBuf> = LazyLock::new(|| utils::DATA_DIR.join("latest.log"));
 
 pub fn register_message_sender(sender: impl FnMut(Message) + Send + Sync + 'static) {
     SENDER
@@ -46,7 +45,7 @@ pub fn init() {
     let file = OpenOptions::new()
         .append(true)
         .create(true)
-        .open(&*LOG_FILE)
+        .open(LOG_FILE.as_path())
         .unwrap();
     let file_logger = env_logger::Builder::new()
         .filter_level(LevelFilter::Debug)

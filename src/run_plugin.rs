@@ -9,7 +9,7 @@ use iced::{
 
 use crate::{
     Action, CustomData, Entry, Message, PluginContext, ResultBuilderRef, StructPlugin,
-    matcher::MatcherInput, utils,
+    matcher::MatcherInput, prefix, utils,
 };
 
 struct FileEntry {
@@ -26,9 +26,7 @@ pub struct RunPlugin {
 }
 
 impl StructPlugin for RunPlugin {
-    fn prefix() -> &'static str {
-        "run"
-    }
+    prefix!("run");
 
     async fn get_for_values(
         &self,

@@ -14,13 +14,11 @@ use tokio::sync::RwLock;
 
 use crate::{
     Action, CustomData, Entry, Message, StructPlugin, cache::HTTPCache,
-    filter_service::ResultBuilderRef, matcher::MatcherInput, utils,
+    filter_service::ResultBuilderRef, matcher::MatcherInput, prefix, utils,
 };
 
 #[derive(Default)]
 pub struct FendPlugin(RwLock<Context>);
-
-// TODO: currency handler
 
 impl Interrupt for ResultBuilderRef<'_> {
     fn should_interrupt(&self) -> bool {
@@ -49,7 +47,18 @@ impl fend_core::ExchangeRateFnV2 for ExchangeRateHandler {
     }
 }
 
+fn empty(builder: &ResultBuilderRef<'_>) -> impl Future<Output = bool> {
+    builder.add(Entry {
+        name: "Invalid Input".into(),
+        subtitle: "exchange rates by exchangerate-api.com • powered by fend".into(),
+        perfect_match: true,
+        data: CustomData::new(()),
+    })
+}
+
 impl StructPlugin for FendPlugin {
+    prefix!("fend", "=");
+
     fn actions(&self) -> &[Action] {
         const {
             &[
@@ -59,10 +68,6 @@ impl StructPlugin for FendPlugin {
                 Action::without_shortcut("About Exchangerate API", "exchangerate").keep_open(),
             ]
         }
-    }
-
-    fn prefix() -> &'static str {
-        "fend"
     }
 
     async fn get_for_values(
@@ -76,10 +81,16 @@ impl StructPlugin for FendPlugin {
         let Ok(result) =
             fend_core::evaluate_with_interrupt(input.input(), &mut *self.0.write().await, &builder)
         else {
+            if input.has_prefix() {
+                empty(&builder).await;
+            }
             return;
         };
         let result = result.get_main_result().trim();
         if result.is_empty() {
+            if input.has_prefix() {
+                empty(&builder).await;
+            }
             return;
         }
         let result: Arc<str> = result.into();
@@ -99,18 +110,25 @@ impl StructPlugin for FendPlugin {
         action: &str,
         _: crate::PluginContext<'_>,
     ) -> Task<Message> {
-        let v = thing.into::<Arc<str>>();
         match action {
-            "copy" => clipboard::write(v.to_string()),
-            "suggest" => Task::done(Message::SetSearch(format!("fend {v}"))),
             "fend" => {
                 utils::open_link("https://github.com/printfn/fend/");
-                Task::none()
+                return Task::none();
             }
             "exchangerate" => {
                 utils::open_link("https://www.exchangerate-api.com/");
-                Task::none()
+                return Task::none();
             }
+            _ => (),
+        }
+
+        let Some(v) = thing.try_get::<Arc<str>>() else {
+            return Task::none();
+        };
+
+        match action {
+            "copy" => clipboard::write(v.to_string()),
+            "suggest" => Task::done(Message::SetSearch(format!("fend {v}"))),
             _ => unreachable!(),
         }
     }

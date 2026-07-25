@@ -1,7 +1,10 @@
 use iced::{Element, Size, Task, window};
 use settings::SettingsMessage;
 
-use crate::{Message, State};
+use crate::{
+    Message, State, config::PluginSettingsValue,
+    special_windows::custom_settings::CustomSettingsMessage,
+};
 
 pub mod custom_settings;
 pub mod error_popup;
@@ -13,11 +16,13 @@ pub enum SpecialWindowState {
     ErrorPopup(error_popup::State),
     WarnPopup(warning_popup::State),
     Settings(settings::SettingsState),
+    CustomSettings(custom_settings::CustomSettingsState),
 }
 
 #[derive(Clone, Debug)]
 pub enum SpecialWindowMessage {
     Settings(SettingsMessage),
+    CustomSettings(CustomSettingsMessage),
 }
 
 impl Clone for SpecialWindowState {
@@ -32,6 +37,7 @@ impl SpecialWindowState {
             SpecialWindowState::ErrorPopup(state) => state.view(id),
             SpecialWindowState::WarnPopup(state) => state.view(id),
             SpecialWindowState::Settings(state) => state.view(id, parent_state),
+            SpecialWindowState::CustomSettings(state) => state.view(id, parent_state),
         }
     }
 
@@ -45,6 +51,10 @@ impl SpecialWindowState {
             (SpecialWindowState::Settings(state), SpecialWindowMessage::Settings(message)) => {
                 state.update(id, parent_state, message)
             }
+            (
+                SpecialWindowState::CustomSettings(state),
+                SpecialWindowMessage::CustomSettings(message),
+            ) => state.update(id, parent_state, message),
             _ => Task::none(),
         }
     }
@@ -56,7 +66,7 @@ impl SpecialWindowState {
                 width: 400.0,
                 height: 150.0,
             }),
-            SpecialWindowState::Settings(_) => None,
+            SpecialWindowState::Settings(_) | SpecialWindowState::CustomSettings(_) => None,
         }
     }
 
@@ -65,6 +75,13 @@ impl SpecialWindowState {
     }
     pub fn new_warning_popup(message: String) -> Self {
         Self::WarnPopup(warning_popup::State { message })
+    }
+
+    pub fn custom_settings(plugin: Box<str>, value: PluginSettingsValue, state: &State) -> Self {
+        let scheme = &state.plugin_configs[&*plugin].widget;
+        Self::CustomSettings(custom_settings::CustomSettingsState::new(
+            value, plugin, scheme,
+        ))
     }
 
     pub(crate) fn settings(config: crate::config::Config) -> Self {

@@ -1,4 +1,4 @@
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::fmt::{Debug, Display};
 use std::hash::{Hash, Hasher};
 use std::ops::{Bound, Deref, Range, RangeBounds};
@@ -76,6 +76,14 @@ impl Display for StringLike {
 }
 
 impl StringLike {
+    pub fn into_box_str(self) -> Box<str> {
+        match self {
+            StringLike::Owned(s) => s.into_boxed_str(),
+            StringLike::Empty => Box::default(),
+            _ => self.to_str().into(),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match self {
             StringLike::Static(v) => v.is_empty(),
@@ -275,7 +283,7 @@ pub trait Plugin: Send + Sync {
     fn actions(&self) -> &[Action] {
         const { &[Action::default("Default Action", "")] }
     }
-    fn prefix(&self) -> &str;
+    fn prefixes(&self) -> &[Cow<'static, str>];
     fn get_for_values_arc(
         &self,
         input: Arc<MatcherInput>,
@@ -347,8 +355,8 @@ pub trait InstancePlugin: Plugin + Clone + 'static {
     fn config(&mut self) -> Option<PluginSettings>;
 }
 impl<T: StructPlugin> Plugin for T {
-    fn prefix(&self) -> &str {
-        Self::prefix()
+    fn prefixes(&self) -> &[Cow<'static, str>] {
+        Self::prefixes()
     }
 
     fn get_for_values(
@@ -391,7 +399,7 @@ impl<T: StructPlugin> Plugin for T {
     }
 }
 pub trait StructPlugin: Send + Sync + Default + 'static {
-    fn prefix() -> &'static str;
+    fn prefixes() -> &'static [Cow<'static, str>];
     fn config() -> Option<PluginSettings> {
         None
     }
@@ -432,7 +440,7 @@ pub trait StructPlugin: Send + Sync + Default + 'static {
 pub trait AnyPlugin: Send + Sync {
     fn as_any_ref(&self) -> &dyn std::any::Any;
     fn any_actions(&self) -> &[Action];
-    fn any_prefix(&self) -> &str;
+    fn any_prefixes(&self) -> &[Cow<'static, str>];
     fn any_get_for_values<'fut>(
         &'fut self,
         input: Arc<MatcherInput>,
@@ -463,8 +471,8 @@ impl<T: Plugin + 'static> AnyPlugin for T {
         self.actions()
     }
 
-    fn any_prefix(&self) -> &str {
-        self.prefix()
+    fn any_prefixes(&self) -> &[Cow<'static, str>] {
+        self.prefixes()
     }
 
     fn any_get_for_values<'fut>(
@@ -529,6 +537,11 @@ impl CustomData {
             .downcast()
             .expect("this should never fail")
     }
+
+    #[must_use]
+    pub fn try_get<T: CustomDataCompatible>(&self) -> Option<&T> {
+        (&*self.0 as &dyn std::any::Any).downcast_ref()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -562,4 +575,13 @@ impl GenericEntry {
         self.perfect_match = perfect;
         self
     }
+}
+
+#[macro_export]
+macro_rules! prefix {
+    ($($v:expr),+ $(,)?) => {
+        fn prefixes() -> &'static [std::borrow::Cow<'static, str>] {
+            &[$(std::borrow::Cow::Borrowed($v)),*]
+        }
+    };
 }

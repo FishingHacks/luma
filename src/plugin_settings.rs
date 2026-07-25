@@ -296,47 +296,50 @@ pub enum PluginSettingsValue {
     Null,
 }
 
+impl PluginSettingsValue {
+    pub const DEFAULT: &Self = &Self::Null;
+}
+
 #[derive(Debug)]
-pub enum PluginSettings {
+pub struct PluginSettings {
+    pub label: Option<Box<str>>,
+    pub description: Box<str>,
+    pub widget: PluginWidget,
+}
+
+#[derive(Debug)]
+pub enum PluginWidget {
     Object {
         values: HashMap<Box<str>, PluginSettings>,
-        label: Option<Box<str>>,
     },
     List {
         value_type: Box<PluginSettings>,
         max_entries: Option<usize>,
-        label: Option<Box<str>>,
     },
     ParagraphInput {
         min: usize,
         max: Option<usize>,
-        label: Option<Box<str>>,
         default: Box<str>,
     },
     StringInput {
         min: usize,
         max: Option<usize>,
-        label: Option<Box<str>>,
         default: Box<str>,
     },
     Checkbox {
-        label: Option<Box<str>>,
         default: bool,
     },
     Toggle {
-        label: Option<Box<str>>,
         default: bool,
     },
     // PickList [[why are iced names this cursed lmao]]
     Dropdown {
         values: Vec<Box<str>>,
-        label: Option<Box<str>>,
         default: usize,
     },
     // PickList [[why are iced names this cursed lmao]]
     SearchableDropdown {
         values: Vec<Box<str>>,
-        label: Option<Box<str>>,
         default: usize,
     },
     IntSlider {
@@ -344,28 +347,24 @@ pub enum PluginSettings {
         max: i64,
         step: i64,
         default: i64,
-        label: Option<Box<str>>,
     },
     IntInput {
         min: Option<i64>,
         max: Option<i64>,
         step: i64,
         default: i64,
-        label: Option<Box<str>>,
     },
     Slider {
         min: f64,
         max: f64,
         step: Option<f64>,
         default: f64,
-        label: Option<Box<str>>,
     },
     NumInput {
         min: Option<f64>,
         max: Option<f64>,
         step: Option<f64>,
         default: f64,
-        label: Option<Box<str>>,
     },
 }
 
@@ -435,13 +434,13 @@ impl PluginSettingsHolder {
                 reader.insert(
                     plugin.into(),
                     PluginSettingsRoot {
-                        value: Self::default(scheme),
+                        value: Self::default(&scheme.widget),
                         lua: OnceLock::new(),
                     },
                 );
                 false
             }
-            Some(value) => match Self::apply_default(scheme, &mut value.value) {
+            Some(value) => match Self::apply_default(&scheme.widget, &mut value.value) {
                 DefaultApplyResult::NoChanges => false,
                 DefaultApplyResult::Changes => {
                     value.lua = OnceLock::new();
@@ -452,28 +451,30 @@ impl PluginSettingsHolder {
         }
     }
 
-    fn apply_default(
-        scheme: &PluginSettings,
-        value: &mut PluginSettingsValue,
-    ) -> DefaultApplyResult {
-        use PluginSettings as PS;
+    fn apply_default(scheme: &PluginWidget, value: &mut PluginSettingsValue) -> DefaultApplyResult {
         use PluginSettingsValue as PSV;
+        use PluginWidget as PW;
 
         let mut result = DefaultApplyResult::NoChanges;
         match (scheme, value) {
-            (PS::Object { values, .. }, PSV::Map(map)) => {
+            (PW::Object { values, .. }, PSV::Map(map)) => {
                 for (k, scheme) in values {
                     let value = map.get_mut(k);
                     if let Some(v) = value {
-                        result |= Self::apply_default(scheme, v);
+                        result |= Self::apply_default(&scheme.widget, v);
                     } else {
                         result |= DefaultApplyResult::Changes;
-                        map.insert(k.clone(), Self::default(scheme));
+                        map.insert(k.clone(), Self::default(&scheme.widget));
                     }
+                }
+                let len = map.len();
+                map.retain(|k, _| values.contains_key(k));
+                if len != map.len() {
+                    result |= DefaultApplyResult::Changes;
                 }
             }
             (
-                PS::List {
+                PW::List {
                     value_type,
                     max_entries,
                     ..
@@ -481,94 +482,102 @@ impl PluginSettingsHolder {
                 PSV::List(list),
             ) => {
                 for v in list.iter_mut() {
-                    result |= Self::apply_default(value_type, v);
+                    result |= Self::apply_default(&value_type.widget, v);
                 }
                 if let Some(len) = max_entries
                     && list.len() > *len
                 {
+                    log::debug!("1");
                     return DefaultApplyResult::Error;
                 }
             }
-            (PS::ParagraphInput { min, max, .. }, PSV::String(s)) => {
+            (PW::ParagraphInput { min, max, .. }, PSV::String(s)) => {
                 if s.len() < *min {
+                    log::debug!("2");
                     return DefaultApplyResult::Error;
                 }
                 if let Some(max) = max
                     && s.len() > *max
                 {
+                    log::debug!("3");
                     return DefaultApplyResult::Error;
                 }
             }
-            (PS::StringInput { min, max, .. }, PSV::String(s)) => {
+            (PW::StringInput { min, max, .. }, PSV::String(s)) => {
                 if s.len() < *min {
+                    log::debug!("4");
                     return DefaultApplyResult::Error;
                 }
                 if let Some(max) = max
                     && s.len() > *max
                 {
+                    log::debug!("5");
                     return DefaultApplyResult::Error;
                 }
                 if s.contains('\n') {
+                    log::debug!("6");
                     return DefaultApplyResult::Error;
                 }
             }
-            (PS::Checkbox { .. } | PS::Toggle { .. }, PSV::Boolean(_)) => (),
+            (PW::Checkbox { .. } | PW::Toggle { .. }, PSV::Boolean(_)) => (),
             (
-                PS::Dropdown { values, .. } | PS::SearchableDropdown { values, .. },
+                PW::Dropdown { values, .. } | PW::SearchableDropdown { values, .. },
                 PSV::String(s),
-            ) if !values.iter().any(|v| **v == *s) => return DefaultApplyResult::Error,
-            (PS::IntSlider { min, max, step, .. }, PSV::Int(i)) => {
-                if *i < *min {
-                    return DefaultApplyResult::Error;
-                }
-                if *i > *max {
-                    return DefaultApplyResult::Error;
-                }
-                if *i % *step != 0 {
+            ) => {
+                if !values.iter().any(|v| **v == *s) {
                     return DefaultApplyResult::Error;
                 }
             }
-            (PS::IntInput { min, max, step, .. }, PSV::Int(i)) => {
+            (&PW::IntSlider { min, max, step, .. }, &mut PSV::Int(i)) => {
+                if i < min {
+                    return DefaultApplyResult::Error;
+                }
+                if i > max {
+                    return DefaultApplyResult::Error;
+                }
+                if (i - min) % step != 0 {
+                    return DefaultApplyResult::Error;
+                }
+            }
+            (&PW::IntInput { min, max, step, .. }, &mut PSV::Int(i)) => {
                 if let Some(min) = min
-                    && *i < *min
+                    && i < min
                 {
                     return DefaultApplyResult::Error;
                 }
                 if let Some(max) = max
-                    && *i > *max
+                    && i > max
                 {
                     return DefaultApplyResult::Error;
                 }
-                if *i % *step != 0 {
+                if (i - min.unwrap_or(0)) % step != 0 {
                     return DefaultApplyResult::Error;
                 }
             }
-            (PS::Slider { min, max, step, .. }, PSV::Number(n)) => {
-                if *n < *min {
+            (&PW::Slider { min, max, step, .. }, &mut PSV::Number(n)) => {
+                if n < min {
                     return DefaultApplyResult::Error;
                 }
-                if *n > *max {
+                if n > max {
                     return DefaultApplyResult::Error;
                 }
                 if let Some(step) = step
-                    && *n % *step != 0.0
-                {
-                    return DefaultApplyResult::Error;
-                }
+                    && (n - min) % step != 0.0
+                {}
             }
-            (PS::NumInput { min, max, step, .. }, PSV::Number(n)) => {
+            (&PW::NumInput { min, max, step, .. }, &mut PSV::Number(n)) => {
                 if let Some(min) = min
-                    && *n < *min
+                    && n < min
                 {
                     return DefaultApplyResult::Error;
                 }
                 if let Some(max) = max
-                    && *n > *max
+                    && n > max
                 {
                     return DefaultApplyResult::Error;
                 }
                 if let Some(step) = step
-                    && *n % *step != 0.0
+                    && (n - min.unwrap_or(0.0)) % step != 0.0
                 {
                     return DefaultApplyResult::Error;
                 }
@@ -578,13 +587,65 @@ impl PluginSettingsHolder {
         result
     }
 
-    fn default(scheme: &PluginSettings) -> PluginSettingsValue {
-        use PluginSettings as E;
+    pub fn is_valid(scheme: &PluginWidget, value: &PluginSettingsValue) -> bool {
+        use PluginSettingsValue as PSV;
+        use PluginWidget as PW;
+
+        match (scheme, value) {
+            (PW::Object { values, .. }, PSV::Map(map)) => values.iter().all(|(k, scheme)| {
+                let value = map.get(k);
+                value.is_some_and(|v| Self::is_valid(&scheme.widget, v))
+            }),
+            (
+                PW::List {
+                    value_type,
+                    max_entries,
+                    ..
+                },
+                PSV::List(list),
+            ) => {
+                let scheme = &value_type.widget;
+                list.iter().all(|v| Self::is_valid(scheme, v))
+                    && max_entries.is_none_or(|len| list.len() <= len)
+            }
+            (PW::ParagraphInput { min, max, .. }, PSV::String(s)) => {
+                s.len() >= *min && max.is_none_or(|len| s.len() <= len)
+            }
+            (PW::StringInput { min, max, .. }, PSV::String(s)) => {
+                s.len() >= *min && max.is_none_or(|len| s.len() <= len) && !s.contains('\n')
+            }
+            (PW::Checkbox { .. } | PW::Toggle { .. }, PSV::Boolean(_)) => true,
+            (
+                PW::Dropdown { values, .. } | PW::SearchableDropdown { values, .. },
+                PSV::String(s),
+            ) => values.iter().any(|v| **v == *s),
+            (&PW::IntSlider { min, max, step, .. }, &PSV::Int(i)) => {
+                i >= min && i <= max && (i - min) % step == 0
+            }
+            (&PW::IntInput { min, max, step, .. }, &PSV::Int(i)) => {
+                min.is_none_or(|min| i >= min)
+                    && max.is_none_or(|max| i <= max)
+                    && (i - min.unwrap_or(0)) % step == 0
+            }
+            (&PW::Slider { min, max, step, .. }, &PSV::Number(n)) => {
+                n >= min && n <= max && step.is_none_or(|step| (n - min) % step == 0.0)
+            }
+            (&PW::NumInput { min, max, step, .. }, &PSV::Number(n)) => {
+                min.is_none_or(|min| n >= min)
+                    && max.is_none_or(|max| n <= max)
+                    && step.is_none_or(|step| (n - min.unwrap_or(0.0)) % step == 0.0)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn default(scheme: &PluginWidget) -> PluginSettingsValue {
+        use PluginWidget as E;
         match scheme {
             E::Object { values, .. } => {
                 let mut map = BTreeMap::new();
                 for (k, v) in values {
-                    map.insert(k.clone(), Self::default(v));
+                    map.insert(k.clone(), Self::default(&v.widget));
                 }
                 PluginSettingsValue::Map(map)
             }
@@ -612,7 +673,7 @@ impl PluginSettingsHolder {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DefaultApplyResult {
+pub enum DefaultApplyResult {
     NoChanges = 0,
     Changes = 1,
     Error = 2,

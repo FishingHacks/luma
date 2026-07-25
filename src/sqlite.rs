@@ -3,7 +3,7 @@ use std::{any::Any, sync::Arc};
 use rusqlite::{Connection, Result, Row, ToSql, params_from_iter};
 use tokio::sync::mpsc::{Sender, UnboundedSender, channel, unbounded_channel};
 
-use crate::{plugin::StringLike, utils};
+use crate::{plugin::StringLike, special_files};
 
 type ProcessFunc = dyn Send + FnOnce(&Row<'_>) -> Result<Box<dyn Any + Send>>;
 
@@ -36,7 +36,7 @@ impl Drop for SqliteDeinitializer {
 }
 
 pub fn init() -> Result<(SqliteContext, SqliteDeinitializer)> {
-    let connection = Connection::open(utils::DATA_DIR.join("cache.sqlite"))?;
+    let connection = Connection::open(special_files::SQLITE_FILE.as_path())?;
     let (sender, mut receiver) = unbounded_channel();
     let sender = Arc::new(sender);
     std::thread::spawn(move || {

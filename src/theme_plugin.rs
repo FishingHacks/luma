@@ -6,6 +6,7 @@ use crate::{
     Action, CustomData, Entry, Message, PluginContext, ResultBuilderRef,
     matcher::MatcherInput,
     plugin::{StringLike, StructPlugin},
+    prefix,
 };
 
 static THEMES: LazyLock<Vec<(String, Theme)>> = LazyLock::new(|| {
@@ -19,9 +20,7 @@ static THEMES: LazyLock<Vec<(String, Theme)>> = LazyLock::new(|| {
 pub struct ThemePlugin;
 
 impl StructPlugin for ThemePlugin {
-    fn prefix() -> &'static str {
-        "theme"
-    }
+    prefix!("theme");
 
     async fn get_for_values(
         &self,

@@ -4,16 +4,14 @@ use std::fmt::Write;
 
 use crate::{
     Action, CustomData, Entry, ResultBuilderRef, StructPlugin, matcher::MatcherInput,
-    plugin::StringLike,
+    plugin::StringLike, prefix,
 };
 
 #[derive(Default)]
 pub struct DicePlugin;
 
 impl StructPlugin for DicePlugin {
-    fn prefix() -> &'static str {
-        "roll"
-    }
+    prefix!("roll");
 
     async fn get_for_values(
         &self,
