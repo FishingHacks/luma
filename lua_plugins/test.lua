@@ -38,6 +38,13 @@ return {
 			b = "input",
 			c = "input",
 		},
+
+		test11 = "keybind",
+		test12 = {
+			type = "keybind",
+			optional = false,
+			default = "Ctrl + Alt + Delete",
+		},
 	},
 	get_for_values = function(_, input, context)
 		if context.config.show_redi and input:matches("redi") then

@@ -6,11 +6,10 @@ use iced::{
         widget::{Operation, Tree},
     },
     keyboard::{self, Key, Modifiers, key::Named},
-    mouse,
     widget::{Id, TextInput, text_input},
 };
 
-use crate::{ALLOWED_ACTION_MODIFIERS, Message};
+use crate::Message;
 
 pub struct SearchInput<'a>(TextInput<'a, Message>);
 
@@ -102,25 +101,29 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
                 }) => {
                     shell.publish(Message::HideActions);
                 }
+
+                Event::Keyboard(keyboard::Event::KeyReleased { modifiers, .. }) => {
+                    // these are reserved for custom shortcuts.
+                    if modifiers.intersects(crate::ALLOWED_ACTION_MODIFIERS) {
+                        return;
+                    }
+                }
                 Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                    let is_ctrl = *modifiers == Modifiers::CTRL;
-                    let is_ctrl_shift = *modifiers == Modifiers::CTRL.union(Modifiers::SHIFT);
                     match key {
                         Key::Named(Named::ArrowLeft | Named::ArrowRight | Named::Backspace)
-                            if is_ctrl || is_ctrl_shift =>
+                            if modifiers.command() =>
                         {
                             break 'blk false;
                         }
                         Key::Character(c)
-                            if is_ctrl && (c == "a" || c == "c" || c == "x" || c == "v") =>
+                            if modifiers.command()
+                                && (c == "a" || c == "c" || c == "x" || c == "v") =>
                         {
                             break 'blk false;
                         }
-                        Key::Named(Named::Enter)
-                            // only no modifiers or alt+enter count as submit (alt because of the
-                            // actions list that shows up when holding down alt.)
-                            if (*modifiers | Modifiers::ALT) == Modifiers::ALT =>
-                        {
+                        // only no modifiers or alt+enter count as submit (alt because of the
+                        // actions list that shows up when holding down alt.)
+                        Key::Named(Named::Enter) if modifiers.alt() || modifiers.is_empty() => {
                             shell.publish(Message::Submit);
                         }
                         Key::Named(Named::PageUp) => shell.publish(Message::Go10Up),
@@ -129,19 +132,13 @@ impl Widget<Message, Theme, Renderer> for SearchInput<'_> {
                         Key::Named(Named::ArrowDown) => shell.publish(Message::GoDown),
                         Key::Named(Named::Escape) => shell.publish(Message::HideMainWindow),
                         Key::Named(Named::Alt) => shell.publish(Message::ShowActions),
-                        Key::Named(Named::Tab) => {
-                            shell.publish(Message::KeyPressed(Key::Named(Named::Tab), *modifiers));
-                        }
-                        _ if ALLOWED_ACTION_MODIFIERS.intersects(*modifiers) => {
-                            shell.publish(Message::KeyPressed(key.clone(), *modifiers));
+                        // these are reserved for custom shortcuts. All text input shortcuts are
+                        // checked above (e.g. C-a, C-backspace)
+                        _ if modifiers.intersects(crate::ALLOWED_ACTION_MODIFIERS) => {
+                            return;
                         }
                         _ => break 'blk false,
                     }
-                }
-                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-                    if cursor.position_over(layout.bounds()).is_some() =>
-                {
-                    shell.publish(Message::InputPress);
                 }
 
                 _ => break 'blk false,

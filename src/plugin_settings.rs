@@ -7,6 +7,8 @@ use tokio::sync::{RwLock, RwLockReadGuard};
 use mlua::IntoLua;
 use serde::{Deserialize, Serialize, de::Visitor};
 
+use crate::keybind::key_and_modifiers_from_str;
+
 impl<'de> Deserialize<'de> for PluginSettingsValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -326,6 +328,10 @@ pub enum PluginWidget {
         max: Option<usize>,
         default: Box<str>,
     },
+    Keybind {
+        optional: bool,
+        default: Box<str>,
+    },
     Checkbox {
         default: bool,
     },
@@ -487,35 +493,36 @@ impl PluginSettingsHolder {
                 if let Some(len) = max_entries
                     && list.len() > *len
                 {
-                    log::debug!("1");
                     return DefaultApplyResult::Error;
                 }
             }
             (PW::ParagraphInput { min, max, .. }, PSV::String(s)) => {
                 if s.len() < *min {
-                    log::debug!("2");
                     return DefaultApplyResult::Error;
                 }
                 if let Some(max) = max
                     && s.len() > *max
                 {
-                    log::debug!("3");
                     return DefaultApplyResult::Error;
                 }
             }
             (PW::StringInput { min, max, .. }, PSV::String(s)) => {
                 if s.len() < *min {
-                    log::debug!("4");
                     return DefaultApplyResult::Error;
                 }
                 if let Some(max) = max
                     && s.len() > *max
                 {
-                    log::debug!("5");
                     return DefaultApplyResult::Error;
                 }
                 if s.contains('\n') {
-                    log::debug!("6");
+                    return DefaultApplyResult::Error;
+                }
+            }
+            (&PW::Keybind { optional, .. }, PSV::String(s)) => {
+                if (!optional && s.is_empty())
+                    || (!s.is_empty() && key_and_modifiers_from_str(s).is_none())
+                {
                     return DefaultApplyResult::Error;
                 }
             }
@@ -635,39 +642,39 @@ impl PluginSettingsHolder {
                     && max.is_none_or(|max| n <= max)
                     && step.is_none_or(|step| (n - min.unwrap_or(0.0)) % step == 0.0)
             }
+            (&PW::Keybind { optional, .. }, PSV::String(s)) => {
+                (optional && s.is_empty()) || key_and_modifiers_from_str(s).is_some()
+            }
             _ => false,
         }
     }
 
     pub fn default(scheme: &PluginWidget) -> PluginSettingsValue {
+        use PluginSettingsValue as PSV;
         use PluginWidget as E;
+
         match scheme {
             E::Object { values, .. } => {
                 let mut map = BTreeMap::new();
                 for (k, v) in values {
                     map.insert(k.clone(), Self::default(&v.widget));
                 }
-                PluginSettingsValue::Map(map)
+                PSV::Map(map)
             }
-            E::List { .. } => PluginSettingsValue::List(Vec::new()),
+            E::List { .. } => PSV::List(Vec::new()),
             E::ParagraphInput { default, .. } | E::StringInput { default, .. } => {
-                PluginSettingsValue::String(default.to_string())
+                PSV::String(default.to_string())
             }
-            E::Checkbox { default, .. } | E::Toggle { default, .. } => {
-                PluginSettingsValue::Boolean(*default)
-            }
+            E::Checkbox { default, .. } | E::Toggle { default, .. } => PSV::Boolean(*default),
             E::Dropdown {
                 values, default, ..
             }
             | E::SearchableDropdown {
                 values, default, ..
-            } => PluginSettingsValue::String(values[*default].to_string()),
-            E::IntSlider { default, .. } | E::IntInput { default, .. } => {
-                PluginSettingsValue::Int(*default)
-            }
-            E::Slider { default, .. } | E::NumInput { default, .. } => {
-                PluginSettingsValue::Number(*default)
-            }
+            } => PSV::String(values[*default].to_string()),
+            E::IntSlider { default, .. } | E::IntInput { default, .. } => PSV::Int(*default),
+            E::Slider { default, .. } | E::NumInput { default, .. } => PSV::Number(*default),
+            E::Keybind { default, .. } => PSV::String(default.to_string()),
         }
     }
 }

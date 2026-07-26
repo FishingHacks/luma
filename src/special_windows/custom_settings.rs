@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use iced::{
     Element, Length, Task,
+    alignment::Vertical,
     keyboard::Key,
     widget::{
         self, button, checkbox, column, combo_box, container, pick_list, row, scrollable, slider,
@@ -16,6 +17,7 @@ use crate::{
     Message, State,
     config::{PluginSettings, PluginSettingsValue},
     format_key, key_element,
+    keybind_input::KeybindInput,
     plugin_settings::{PluginSettingsHolder, PluginWidget},
     special_windows::SpecialWindowMessage,
 };
@@ -360,7 +362,7 @@ impl CustomSettingsState {
 impl PluginSettings {
     fn view<'a>(
         &'a self,
-        value: &PluginSettingsValue,
+        value: &'a PluginSettingsValue,
         id: window::Id,
         path: Box<[StringOrUsize]>,
         widget_states: &'a WidgetStates,
@@ -406,9 +408,9 @@ impl PluginSettings {
             }
             PluginWidget::List { value_type, .. } => {
                 let v = if let PluginSettingsValue::List(v) = value {
-                    v
+                    v.as_slice()
                 } else {
-                    &Vec::new()
+                    &[]
                 };
 
                 let add_msg = CustomSettingsMessage::ListOp {
@@ -481,7 +483,12 @@ impl PluginSettings {
             _ => {
                 let widget = self.widget.view(value, id, path, widget_states);
 
-                row([left_widget, space().width(Length::Fill).into(), widget]).into()
+                row([
+                    row![left_widget, space().width(Length::Fill)].into(),
+                    widget,
+                ])
+                .align_y(Vertical::Center)
+                .into()
             }
         }
     }
@@ -497,7 +504,7 @@ fn path_with(p: &[StringOrUsize], w: StringOrUsize) -> Box<[StringOrUsize]> {
 impl PluginWidget {
     fn view<'a>(
         &'a self,
-        value: &PluginSettingsValue,
+        value: &'a PluginSettingsValue,
         id: window::Id,
         path: Box<[StringOrUsize]>,
         widget_states: &'a WidgetStates,
@@ -534,6 +541,26 @@ impl PluginWidget {
                     })
                     .into()
             }
+            Self::Keybind { optional, default } => {
+                let v = if let PluginSettingsValue::String(s) = value {
+                    s.as_str()
+                } else {
+                    default
+                };
+
+                Element::new(KeybindInput::new(
+                    v,
+                    Some(default),
+                    move |s| {
+                        let msg = CustomSettingsMessage::Change {
+                            path: path.clone(),
+                            value: PluginSettingsValue::String(s),
+                        };
+                        Message::SpecialWindow(SpecialWindowMessage::CustomSettings(msg), id)
+                    },
+                    *optional,
+                ))
+            }
             Self::Toggle { .. } | Self::Checkbox { .. } => {
                 let v = if let PluginSettingsValue::Boolean(v) = value {
                     *v
@@ -547,9 +574,9 @@ impl PluginWidget {
                     Message::SpecialWindow(SpecialWindowMessage::CustomSettings(msg), id)
                 };
                 if matches!(self, Self::Toggle { .. }) {
-                    toggler(v).on_toggle(on_toggle).into()
+                    toggler(v).on_toggle(on_toggle).size(20).into()
                 } else {
-                    checkbox(v).on_toggle(on_toggle).into()
+                    checkbox(v).on_toggle(on_toggle).size(20).into()
                 }
             }
             Self::Dropdown { values, default } => {

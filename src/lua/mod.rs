@@ -346,7 +346,14 @@ impl FromLua for KeybindWrapper {
                             }
                         })?;
                     } else {
-                        return Ok(Self(modifiers, crate::keybind::key_from_str(&v)));
+                        let Some(key) = crate::keybind::key_from_str(&v) else {
+                            return Err(mlua::Error::FromLuaConversionError {
+                                from: "String",
+                                to: "Key".into(),
+                                message: Some(format!("{v:?} is not a valid key")),
+                            });
+                        };
+                        return Ok(Self(modifiers, key));
                     }
                 }
                 Ok(Self(Modifiers::empty(), Key::Unidentified))
@@ -530,6 +537,10 @@ impl FromLua for PluginSettings {
                         max: None,
                         default: Box::default(),
                     },
+                    "keybind" | "keybind_input" => PW::Keybind {
+                        optional: true,
+                        default: Box::default(),
+                    },
                     "checkbox" | "checkmark" => PW::Checkbox { default: false },
                     "toggle" | "switch" => PW::Toggle { default: false },
                     "intinput" | "int_input" => PW::IntInput {
@@ -585,6 +596,15 @@ impl FromLua for PluginSettings {
                         max: t.get("max")?,
                         default: t.get::<Option<_>>("default")?.unwrap_or_default(),
                     },
+                    "keybind" | "keybind_input" => {
+                        let optional = t.get::<bool>("optional")?;
+                        let default = if optional && !t.contains_key("default")? {
+                            Box::default()
+                        } else {
+                            t.get("default")?
+                        };
+                        PW::Keybind { optional, default }
+                    }
                     "checkbox" | "checkmark" => PW::Checkbox {
                         default: t.get::<Option<_>>("default")?.unwrap_or(false),
                     },

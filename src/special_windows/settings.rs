@@ -8,6 +8,7 @@ use iced::{
 use crate::{
     Message, State,
     config::{BlurAction, Config},
+    keybind_input::KeybindInput,
     plugin::StringLike,
     special_windows::SpecialWindowState,
 };
@@ -30,6 +31,7 @@ pub enum SettingsMessage {
     SetForceFocus(bool),
     SetPluginEnabled(StringLike, bool),
     OpenCustomSettings(StringLike),
+    SetKeybind(String),
     Save,
     Discard,
 }
@@ -42,7 +44,7 @@ impl SettingsState {
         }
     }
 
-    pub fn view<'a>(&self, id: window::Id, state: &'a State) -> Element<'a, Message> {
+    pub fn view<'a>(&'a self, id: window::Id, state: &'a State) -> Element<'a, Message> {
         let mut col = column![
             text("Luma Settings").size(25).width(Length::Fill).center(),
             space().width(Length::Fill).height(Length::Fixed(10.0))
@@ -58,6 +60,12 @@ impl SettingsState {
                 .label("Force focus when the launcher is opened")
                 .on_toggle(move |v| (SettingsMessage::SetForceFocus(v), id).into()),
         );
+        col = col.push(KeybindInput::new(
+            &self.config.keybind,
+            None,
+            move |s| (SettingsMessage::SetKeybind(s), id).into(),
+            false,
+        ));
         col = col.push(text("Plugins").size(18).width(Length::Fill).center());
         for plugin in state
             .plugin_builder
@@ -148,6 +156,7 @@ impl SettingsState {
                     Task::batch([open_task, window::close(id)])
                 };
             }
+            SettingsMessage::SetKeybind(new) => self.config.keybind = new,
         }
         self.changed = true;
         Task::none()

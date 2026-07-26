@@ -5,101 +5,26 @@ use iced::keyboard::{Key, Modifiers, key::Named};
 
 static NAMED_KEY: LazyLock<HashMap<&'static str, Named>> = LazyLock::new(|| {
     let mut map = HashMap::new();
-    map.insert("alt", Named::Alt);
-    map.insert("altgr", Named::AltGraph);
-    map.insert("capslock", Named::CapsLock);
-    map.insert("control", Named::Control);
-    map.insert("ctrl", Named::Control);
-    map.insert("fn", Named::Fn);
-    map.insert("fnlock", Named::FnLock);
-    map.insert("numlock", Named::NumLock);
-    map.insert("scrllck", Named::ScrollLock);
-    map.insert("scrolllock", Named::ScrollLock);
-    map.insert("shift", Named::Shift);
-    map.insert("symbol", Named::Symbol);
-    map.insert("symbollock", Named::SymbolLock);
-    map.insert("super", Named::Super);
-    map.insert("meta", Named::Super);
-    map.insert("win", Named::Super);
-    map.insert("cmd", Named::Super);
-    map.insert("command", Named::Super);
-    map.insert("enter", Named::Enter);
-    map.insert("tab", Named::Tab);
-    map.insert("space", Named::Space);
-    map.insert("down", Named::ArrowDown);
-    map.insert("left", Named::ArrowLeft);
-    map.insert("right", Named::ArrowRight);
-    map.insert("up", Named::ArrowUp);
-    map.insert("end", Named::End);
-    map.insert("home", Named::Home);
-    map.insert("pgdn", Named::PageDown);
-    map.insert("pgdwn", Named::PageDown);
-    map.insert("pagedown", Named::PageDown);
-    map.insert("pgup", Named::PageUp);
-    map.insert("pageup", Named::PageUp);
-    map.insert("backspace", Named::Backspace);
-    map.insert("clear", Named::Clear);
-    map.insert("copy", Named::Copy);
-    map.insert("cut", Named::Cut);
-    map.insert("del", Named::Delete);
-    map.insert("delete", Named::Delete);
-    map.insert("insert", Named::Insert);
-    map.insert("paste", Named::Paste);
-    map.insert("redo", Named::Redo);
-    map.insert("undo", Named::Undo);
-    map.insert("accept", Named::Accept);
-    map.insert("again", Named::Again);
-    map.insert("pause", Named::Pause);
-    map.insert("play", Named::Play);
-    map.insert("select", Named::Select);
-    map.insert("new", Named::New);
-    map.insert("open", Named::Open);
-    map.insert("print", Named::Print);
-    map.insert("save", Named::Save);
-    map.insert("f1", Named::F1);
-    map.insert("f2", Named::F2);
-    map.insert("f3", Named::F3);
-    map.insert("f4", Named::F4);
-    map.insert("f5", Named::F5);
-    map.insert("f6", Named::F6);
-    map.insert("f7", Named::F7);
-    map.insert("f8", Named::F8);
-    map.insert("f9", Named::F9);
-    map.insert("f10", Named::F10);
-    map.insert("f11", Named::F11);
-    map.insert("f12", Named::F12);
-    map.insert("f13", Named::F13);
-    map.insert("f14", Named::F14);
-    map.insert("f15", Named::F15);
-    map.insert("f16", Named::F16);
-    map.insert("f17", Named::F17);
-    map.insert("f18", Named::F18);
-    map.insert("f19", Named::F19);
-    map.insert("f20", Named::F20);
-    map.insert("f21", Named::F21);
-    map.insert("f22", Named::F22);
-    map.insert("f23", Named::F23);
-    map.insert("f24", Named::F24);
-    map.insert("f25", Named::F25);
-    map.insert("f26", Named::F26);
-    map.insert("f27", Named::F27);
-    map.insert("f28", Named::F28);
-    map.insert("f29", Named::F29);
-    map.insert("f30", Named::F30);
-    map.insert("f31", Named::F31);
-    map.insert("f32", Named::F32);
-    map.insert("f33", Named::F33);
-    map.insert("f34", Named::F34);
-    map.insert("f35", Named::F35);
+    macro_rules! add_to_map {
+        ($($k:ident),+ ; $($ignored:ident),*) => {{
+            #[deny(unreachable_patterns)]
+            const _: () = match Named::Alt { $(Named::$k)|* | $(Named::$ignored)|* => () };
+
+            $(map.insert(stringify!($k), Named::$k);)*
+        }};
+    }
+    #[rustfmt::skip]
+    add_to_map!(AltGraph, CapsLock, Fn, FnLock, NumLock, ScrollLock, Symbol, SymbolLock, Enter, Tab, Space, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, End, Home, PageDown, PageUp, Backspace, Clear, Copy, CrSel, Cut, Delete, EraseEof, ExSel, Insert, Paste, Redo, Undo, Accept, Again, Attn, Cancel, ContextMenu, Execute, Find, Help, Pause, Play, Props, Select, ZoomIn, ZoomOut, BrightnessDown, BrightnessUp, Eject, LogOff, Power, PowerOff, PrintScreen, Hibernate, Standby, WakeUp, AllCandidates, Alphanumeric, CodeInput, Compose, Convert, FinalMode, GroupFirst, GroupLast, GroupNext, GroupPrevious, ModeChange, NextCandidate, NonConvert, PreviousCandidate, Process, SingleCandidate, HangulMode, HanjaMode, JunjaMode, Eisu, Hankaku, Hiragana, HiraganaKatakana, KanaMode, KanjiMode, Katakana, Romaji, Zenkaku, ZenkakuHankaku, Soft1, Soft2, Soft3, Soft4, ChannelDown, ChannelUp, Close, MailForward, MailReply, MailSend, MediaClose, MediaFastForward, MediaPause, MediaPlay, MediaPlayPause, MediaRecord, MediaRewind, MediaStop, MediaTrackNext, MediaTrackPrevious, New, Open, Print, Save, SpellCheck, Key11, Key12, AudioBalanceLeft, AudioBalanceRight, AudioBassBoostDown, AudioBassBoostToggle, AudioBassBoostUp, AudioFaderFront, AudioFaderRear, AudioSurroundModeNext, AudioTrebleDown, AudioTrebleUp, AudioVolumeDown, AudioVolumeUp, AudioVolumeMute, MicrophoneToggle, MicrophoneVolumeDown, MicrophoneVolumeUp, MicrophoneVolumeMute, SpeechCorrectionList, SpeechInputToggle, LaunchApplication1, LaunchApplication2, LaunchCalendar, LaunchContacts, LaunchMail, LaunchMediaPlayer, LaunchMusicPlayer, LaunchPhone, LaunchScreenSaver, LaunchSpreadsheet, LaunchWebBrowser, LaunchWebCam, LaunchWordProcessor, BrowserBack, BrowserFavorites, BrowserForward, BrowserHome, BrowserRefresh, BrowserSearch, BrowserStop, AppSwitch, Call, Camera, CameraFocus, EndCall, GoBack, GoHome, HeadsetHook, LastNumberRedial, Notification, MannerMode, VoiceDial, TV, TV3DMode, TVAntennaCable, TVAudioDescription, TVAudioDescriptionMixDown, TVAudioDescriptionMixUp, TVContentsMenu, TVDataService, TVInput, TVInputComponent1, TVInputComponent2, TVInputComposite1, TVInputComposite2, TVInputHDMI1, TVInputHDMI2, TVInputHDMI3, TVInputHDMI4, TVInputVGA1, TVMediaContext, TVNetwork, TVNumberEntry, TVPower, TVRadioService, TVSatellite, TVSatelliteBS, TVSatelliteCS, TVSatelliteToggle, TVTerrestrialAnalog, TVTerrestrialDigital, TVTimer, AVRInput, AVRPower, ColorF0Red, ColorF1Green, ColorF2Yellow, ColorF3Blue, ColorF4Grey, ColorF5Brown, ClosedCaptionToggle, Dimmer, DisplaySwap, DVR, Exit, FavoriteClear0, FavoriteClear1, FavoriteClear2, FavoriteClear3, FavoriteRecall0, FavoriteRecall1, FavoriteRecall2, FavoriteRecall3, FavoriteStore0, FavoriteStore1, FavoriteStore2, FavoriteStore3, Guide, GuideNextDay, GuidePreviousDay, Info, InstantReplay, Link, ListProgram, LiveContent, Lock, MediaApps, MediaAudioTrack, MediaLast, MediaSkipBackward, MediaSkipForward, MediaStepBackward, MediaStepForward, MediaTopMenu, NavigateIn, NavigateNext, NavigateOut, NavigatePrevious, NextFavoriteChannel, NextUserProfile, OnDemand, Pairing, PinPDown, PinPMove, PinPToggle, PinPUp, PlaySpeedDown, PlaySpeedReset, PlaySpeedUp, RandomToggle, RcLowBattery, RecordSpeedNext, RfBypass, ScanChannelsToggle, ScreenModeNext, Settings, SplitScreenToggle, STBInput, STBPower, Subtitle, Teletext, VideoModeNext, Wink, ZoomToggle, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, F13, F14, F15, F16, F17, F18, F19, F20, F21, F22, F23, F24, F25, F26, F27, F28, F29, F30, F31, F32, F33, F34, F35; Alt, Control, Super, Hyper, Meta, Shift, Escape);
     map
 });
 
-pub fn key_from_str(s: &str) -> Key {
+pub fn key_from_str(s: &str) -> Option<Key> {
     let s = s.trim().to_lowercase();
     NAMED_KEY
         .get(&s as &str)
         .copied()
-        .map_or_else(move || Key::Character(s.into()), Key::Named)
+        .map(Key::Named)
+        .or_else(|| Some(Key::Character(s.try_into().ok()?)))
 }
 
 pub fn modifier_from_str(s: &str) -> Option<Modifiers> {
@@ -130,7 +55,7 @@ pub fn key_and_modifiers_from_str(s: &str) -> Option<(Modifiers, Key)> {
     loop {
         let next = peekable.next()?.trim();
         if peekable.peek().is_none() {
-            return Some((modifiers, key_from_str(next)));
+            return Some((modifiers, key_from_str(next)?));
         }
         modifiers |= modifier_from_str(next)?;
     }

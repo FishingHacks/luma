@@ -1,15 +1,13 @@
+// TODO: Figure out what can be turned to single-threaded equivalents (i.e. arc -> rc, mutex/rwlock
+// -> refcell/cell)
+
 #![warn(clippy::pedantic)]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::unreadable_literal)]
 use std::{
-    borrow::Cow,
-    collections::{BTreeMap, HashMap},
-    ffi::OsStr,
-    fmt::Debug,
-    hash::Hash,
-    sync::Arc,
+    borrow::Cow, collections::HashMap, ffi::OsStr, fmt::Debug, hash::Hash, sync::Arc,
     time::Duration,
 };
 
@@ -28,7 +26,7 @@ use iced::{
     border::Radius,
     color,
     futures::{SinkExt, Stream, channel::mpsc::Sender},
-    keyboard::{Key, Modifiers, key::Named},
+    keyboard::{self, Key, Modifiers, key::Named},
     mouse::ScrollDelta,
     stream::channel,
     widget::{
@@ -56,6 +54,7 @@ mod file_index;
 mod file_plugin;
 mod filter_service;
 mod keybind;
+mod keybind_input;
 mod logging;
 mod lua;
 mod matcher;
@@ -185,7 +184,16 @@ impl Debug for SharedAnyPlugin {
 }
 
 #[derive(Debug, Clone)]
+pub enum WindowEvent {
+    Blurred(window::Id),
+    Focused(window::Id),
+    KeyPressed(Key, Modifiers),
+    Closed(window::Id),
+}
+
+#[derive(Debug, Clone)]
 pub enum Message {
+    WindowEvent(WindowEvent),
     SpecialWindow(SpecialWindowMessage, window::Id),
     UpdateSearch(String),
     SetSearch(String),
@@ -195,10 +203,9 @@ pub enum Message {
     Go10Up,
     Go10Down,
     Submit,
-    Click(usize),
+    RunAction(usize),
     HideMainWindow,
     Hide(window::Id),
-    Closed(window::Id),
     Show,
     ChangeTheme(Theme),
     HandleAction {
@@ -211,12 +218,10 @@ pub enum Message {
     Exit,
     CollectorMessage(CollectorMessage),
     ResultsUpdated,
-    KeyPressed(Key, Modifiers),
     ShowActions,
     GetContext(TokioSender<Context>),
     UpdateConfig(Arc<Config>, bool),
     HideActions,
-    Blurred(window::Id),
     OpenSpecial(SpecialWindowState),
     IndexerMessage(FileIndexResponse),
     HotkeyPressed(GlobalHotKeyEvent),
@@ -243,13 +248,14 @@ pub struct State {
     collector_controller: Option<CollectorController>,
     showing_actions: bool,
     selected_action: usize,
-    special_windows: BTreeMap<window::Id, SpecialWindowState>,
+    special_windows: HashMap<window::Id, SpecialWindowState>,
     lua: Lua,
     context: Context,
     manager: Arc<GlobalHotKeyManager>,
+    focused: Option<window::Id>,
 }
 
-const ALLOWED_ACTION_MODIFIERS: Modifiers = Modifiers::COMMAND
+pub const ALLOWED_ACTION_MODIFIERS: Modifiers = Modifiers::COMMAND
     .union(Modifiers::ALT)
     .union(Modifiers::CTRL)
     .union(Modifiers::LOGO);
@@ -323,14 +329,7 @@ impl Action {
     }
 }
 
-#[must_use]
-pub fn format_key(key: &Key, modifiers: Modifiers) -> String {
-    use std::fmt::Write;
-    let mut s = String::new();
-
-    if matches!(key, Key::Unidentified) {
-        return s;
-    }
+pub fn format_modifiers(modifiers: Modifiers, s: &mut String) {
     if Modifiers::CTRL.intersects(modifiers) {
         s.push_str("Ctrl + ");
     }
@@ -345,6 +344,14 @@ pub fn format_key(key: &Key, modifiers: Modifiers) -> String {
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         s.push_str("Super + ");
     }
+}
+
+#[must_use]
+pub fn format_key(key: &Key, modifiers: Modifiers) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+
+    format_modifiers(modifiers, &mut s);
     match key {
         Key::Named(Named::Super) => {
             #[cfg(target_os = "windows")]
@@ -472,7 +479,7 @@ impl State {
                     .width(Length::Fill)
                     .height(Length::Fixed(ENTRY_SIZE))
                     .style(button_style(selected))
-                    .on_press(Message::Click(entry_idx + self.offset)),
+                    .on_press(Message::RunAction(entry_idx + self.offset)),
             );
         }
         if self.showing_actions {
@@ -679,21 +686,63 @@ impl State {
                 self.plugins.push(plugin.0);
                 self.update_matches();
             }
-            Message::KeyPressed(key, modifiers) => {
-                if let Some(action) = self
-                    .results
-                    .get(self.selected)
-                    .and_then(|v| self.plugins.get(v.plugin))
-                    .and_then(|plugin| {
-                        plugin
-                            .any_actions()
-                            .iter()
-                            .position(|v| v.shortcut.0 == modifiers && v.shortcut.1 == key)
-                    })
+
+            // Window events. We know the main window must be focused to receive these.
+            Message::WindowEvent(ev) => match ev {
+                WindowEvent::KeyPressed(key, modifiers)
+                    if modifiers.intersects(ALLOWED_ACTION_MODIFIERS) =>
                 {
-                    return self.run(self.selected, action);
+                    if let Some(action) = self
+                        .results
+                        .get(self.selected)
+                        .and_then(|v| self.plugins.get(v.plugin))
+                        .and_then(|plugin| {
+                            plugin
+                                .any_actions()
+                                .iter()
+                                .position(|v| v.shortcut.0 == modifiers && v.shortcut.1 == key)
+                        })
+                    {
+                        return self.run(self.selected, action);
+                    }
                 }
-            }
+                WindowEvent::Blurred(_) => match self.context.config.on_blur {
+                    BlurAction::Refocus => return window::gain_focus(self.window),
+                    BlurAction::None => (),
+                },
+
+                WindowEvent::Closed(_) => {
+                    log::debug!("recreating main window");
+
+                    let mut settings = Settings {
+                        resizable: false,
+                        decorations: false,
+                        level: Level::AlwaysOnTop,
+                        position: Position::Centered,
+                        visible: false,
+                        ..Default::default()
+                    };
+                    settings.size.height = NORESIZE_BASESIZE;
+                    if self.context.config.auto_resize {
+                        settings.position = Position::SpecificWith(|winsize, resolution| {
+                            Point::new(
+                                (resolution.width - winsize.width).max(0.0) / 2.0,
+                                (resolution.height - BASE_SIZE - 12.0 * ENTRY_SIZE).max(0.0) / 2.0,
+                            )
+                        });
+                        settings.size.height = BASE_SIZE;
+                    }
+                    let (id, open_window_task) = window::open(settings);
+                    log::trace!("opened main window with id {id:?}");
+                    self.window = id;
+
+                    return open_window_task.discard();
+                }
+
+                // Ignore these.
+                WindowEvent::KeyPressed(..) | WindowEvent::Focused(_) => (),
+            },
+
             Message::ResultsUpdated => self.update_matches(),
             Message::GoUp => self.handle_go_up(1),
             Message::Go10Up => self.handle_go_up(10),
@@ -709,7 +758,7 @@ impl State {
                     },
                 );
             }
-            Message::Click(index) => {
+            Message::RunAction(index) => {
                 self.selected = index;
                 if self.selected >= self.results.len() && !self.results.is_empty() {
                     self.selected = self.results.len() - 1;
@@ -778,17 +827,11 @@ impl State {
                 };
                 return set_window_height(self.window, new_height, true);
             }
-            Message::Blurred(id) if id == self.window => match self.context.config.on_blur {
-                BlurAction::Refocus => return window::gain_focus(self.window),
-                BlurAction::None => {}
-            },
-            Message::Blurred(_) => {}
 
             // daemon messages
             Message::Show
             | Message::OpenSpecial(_)
             | Message::Hide(_)
-            | Message::Closed(_)
             | Message::HandleAction { .. }
             | Message::None
             | Message::Exit
@@ -980,6 +1023,67 @@ fn daemon_view(state: &State, id: window::Id) -> Element<'_, Message> {
 
 fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
     match message {
+        Message::WindowEvent(ev) => match ev {
+            WindowEvent::Blurred(id) => {
+                let task = if id == state.window {
+                    state.update(Message::WindowEvent(ev))
+                // TODO: Update when special windows need these.
+                // } else if let Some(mut wind) = state.special_windows.remove(&id) {
+                //     let task = wind.window_event(id, state, ev);
+                //     state.special_windows.insert(id, wind);
+                //     task
+                } else {
+                    Task::none()
+                };
+                if Some(id) == state.focused {
+                    state.focused = None;
+                }
+                task
+            }
+            WindowEvent::Focused(id) => {
+                let task = if id == state.window {
+                    state.update(Message::WindowEvent(ev))
+                // TODO: Update when special windows need these.
+                // } else if let Some(mut wind) = state.special_windows.remove(&id) {
+                //     let task = wind.window_event(id, state, ev);
+                //     state.special_windows.insert(id, wind);
+                //     task
+                } else {
+                    Task::none()
+                };
+                state.focused = Some(id);
+                task
+            }
+            #[allow(clippy::match_same_arms)]
+            WindowEvent::Closed(id) => {
+                let task = if id == state.window {
+                    state.update(Message::WindowEvent(ev))
+                // TODO: Update when special windows need these.
+                // } else if let Some(mut wind) = state.special_windows.remove(&id) {
+                //     wind.window_event(id, state, ev)
+                } else {
+                    Task::none()
+                };
+                if Some(id) == state.focused {
+                    state.focused = None;
+                }
+                task
+            }
+            WindowEvent::KeyPressed(..) if let Some(focused) = state.focused => {
+                if focused == state.window {
+                    state.update(Message::WindowEvent(ev))
+                // TODO: Update when special windows need these.
+                // } else if let Some(mut wind) = state.special_windows.remove(&focused) {
+                //     let task = wind.window_event(focused, state, ev);
+                //     state.special_windows.insert(focused, wind);
+                //     task
+                } else {
+                    Task::none()
+                }
+            }
+            // unfocused input, ignore
+            WindowEvent::KeyPressed(..) => Task::none(),
+        },
         Message::SpecialWindow(msg, id) => {
             let Some(mut window_state) = state.special_windows.remove(&id) else {
                 return Task::none();
@@ -1004,38 +1108,6 @@ fn daemon_update(state: &mut State, message: Message) -> Task<Message> {
             }
             state.special_windows.remove(&window_id);
             window::close(window_id)
-        }
-        Message::Closed(window_id) => {
-            if state.window == window_id {
-                log::debug!("recreating main window");
-
-                let mut settings = Settings {
-                    resizable: false,
-                    decorations: false,
-                    level: Level::AlwaysOnTop,
-                    position: Position::Centered,
-                    visible: false,
-                    ..Default::default()
-                };
-                settings.size.height = NORESIZE_BASESIZE;
-                if state.context.config.auto_resize {
-                    settings.position = Position::SpecificWith(|winsize, resolution| {
-                        Point::new(
-                            (resolution.width - winsize.width).max(0.0) / 2.0,
-                            (resolution.height - BASE_SIZE - 12.0 * ENTRY_SIZE).max(0.0) / 2.0,
-                        )
-                    });
-                    settings.size.height = BASE_SIZE;
-                }
-                let (id, open_window_task) = window::open(settings);
-                log::trace!("opened main window with id {id:?}");
-                state.window = id;
-
-                return open_window_task.discard();
-            }
-            state.special_windows.remove(&window_id);
-
-            Task::none()
         }
         Message::HandleAction {
             plugin,
@@ -1239,7 +1311,7 @@ fn main() -> iced::Result {
                 collector_controller: None,
                 showing_actions: false,
                 selected_action: 0,
-                special_windows: BTreeMap::new(),
+                special_windows: HashMap::new(),
                 lua: lua.clone(),
                 context: Context {
                     http_cache: Arc::new(HTTPCache::new().into()),
@@ -1252,6 +1324,7 @@ fn main() -> iced::Result {
                 manager: manager.clone(),
                 initializing_plugins: Vec::new(),
                 plugin_configs: HashMap::new(),
+                focused: None,
             };
             state.add_plugin::<ControlPlugin>();
             state.add_plugin::<ThemePlugin>();
@@ -1265,7 +1338,8 @@ fn main() -> iced::Result {
             let sqlite = sqlite.clone();
             let http_cache_init_task =
                 Task::future(async move { http_cache.read().await.init(sqlite).await }).discard();
-            let recreate_window = Task::done(Message::Closed(state.window));
+            let recreate_window =
+                Task::done(Message::WindowEvent(WindowEvent::Closed(state.window)));
             (
                 state,
                 Task::batch([focus_task, http_cache_init_task, recreate_window]),
@@ -1277,11 +1351,16 @@ fn main() -> iced::Result {
     .theme(|s: &State, _| s.theme.clone())
     .subscription(move |_| {
         Subscription::batch([
-            window::events().map(|ev| match ev.1 {
-                window::Event::Unfocused => Message::Blurred(ev.0),
-                window::Event::Closed => Message::Closed(ev.0),
-                _ => Message::None,
-            }),
+            window::events()
+                .filter_map(|ev| {
+                    Some(match ev.1 {
+                        window::Event::Unfocused => WindowEvent::Blurred(ev.0),
+                        window::Event::Focused => WindowEvent::Focused(ev.0),
+                        window::Event::Closed => WindowEvent::Closed(ev.0),
+                        _ => return None,
+                    })
+                })
+                .map(Message::WindowEvent),
             hotkey_sub().map(Message::HotkeyPressed),
             Subscription::run(file_index::file_index_service).map(Message::IndexerMessage),
             Subscription::run(filter_service::collector).map(Message::CollectorMessage),
@@ -1292,6 +1371,14 @@ fn main() -> iced::Result {
                     });
                 })
             }),
+            keyboard::listen()
+                .filter_map(|ev| match ev {
+                    keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                        Some(WindowEvent::KeyPressed(key, modifiers))
+                    }
+                    _ => None,
+                })
+                .map(Message::WindowEvent),
             cache_clear_sub(),
             watch_config(),
             Subscription::run_with(message_sender_subscription.clone(), message_sender_handler),
